@@ -39,6 +39,13 @@ pub const CTG_CMTL: u32 = u32::from_be_bytes(*b"CMTL");
 /// Action definition chunk.
 pub const CTG_ACTN: u32 = u32::from_be_bytes(*b"ACTN");
 
+// ── Background sub-chunks ───────────────────────────────────────────────────
+
+/// Camera view chunk (inside BKGD). Tag = 'CAM ' (space-padded).
+pub const CTG_CAM: u32 = u32::from_be_bytes(*b"CAM ");
+/// GL-of-lights chunk (inside BKGD). Contains LITE entries (56 bytes each).
+pub const CTG_GLLT: u32 = u32::from_be_bytes(*b"GLLT");
+
 // ── Actor sub-chunks ────────────────────────────────────────────────────────
 
 /// GL of route points for an actor.

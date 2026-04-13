@@ -1,12 +1,16 @@
-//! BRender model and material → GPU conversion.
+//! BRender model, material, camera and light → GPU conversion.
 //!
 //! Converts engine domain types (fixed-point) to renderer types (f32).
 //! This is the boundary where BRS 16.16 → f32 and br_fraction i16 → f32.
 
+use engine::background::{BrCamera, BrLight};
+use glam;
 use engine::fixedpoint::FixedScalar;
 use engine::material::BrMaterial;
 use engine::model::{BrVertex, Model};
 
+use crate::camera::Camera;
+use crate::lighting::GpuLight;
 use crate::material::{GpuMaterial, Material};
 use crate::vertex::{GpuVertex, Mesh};
 
@@ -68,6 +72,49 @@ pub fn material_to_gpu(mat: &BrMaterial) -> Material {
         },
         prelit: false,    // MTRLF has no flags field; use default
         two_sided: false,
+    }
+}
+
+/// Convert a parsed [`BrCamera`] into a renderer [`Camera`].
+///
+/// - `a_fov` (BRA u16) → `fov_y` in radians
+/// - `hither_z` / `yon_z` (BRS) → `near` / `far` as f32
+/// - `bmat34` row 3 → camera position; row 2 → forward direction
+/// - `aspect` must be supplied by the caller (viewport width / height)
+pub fn camera_to_renderer(cam: &BrCamera, aspect: f32) -> Camera {
+    let pos = cam.bmat34.translation_f32();
+    let fwd = cam.bmat34.forward_f32();
+
+    // BRender cameras look in +Z of their local frame (row 2 = forward).
+    let position = glam::Vec3::new(pos[0], pos[1], pos[2]);
+    let target   = glam::Vec3::new(pos[0] + fwd[0], pos[1] + fwd[1], pos[2] + fwd[2]);
+
+    Camera {
+        position,
+        target,
+        up: glam::Vec3::Y,
+        fov_y: cam.fov_radians(),
+        near: cam.hither_f32(),
+        far:  cam.yon_f32(),
+        aspect,
+    }
+}
+
+/// Convert a parsed [`BrLight`] into a renderer [`GpuLight`].
+///
+/// - `bmat34` row 2 → light direction (forward z-axis of the light's frame)
+/// - `r_intensity` (BRS) → `intensity` as f32
+/// - Colour is always white (3DMM does not store per-light RGB on disk)
+/// - Ambient is kept at the renderer default (0.15 grey)
+pub fn light_to_renderer(lite: &BrLight) -> GpuLight {
+    let dir = lite.bmat34.forward_f32();
+    GpuLight {
+        direction: dir,
+        _pad0: 0.0,
+        color: [1.0, 1.0, 1.0],
+        intensity: lite.intensity_f32(),
+        ambient: [0.15, 0.15, 0.15],
+        _pad1: 0.0,
     }
 }
 
