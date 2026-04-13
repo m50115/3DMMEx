@@ -3,11 +3,13 @@
 //! Converts engine domain types (fixed-point) to renderer types (f32).
 //! This is the boundary where BRS 16.16 → f32 and br_fraction i16 → f32.
 
-use engine::background::{BrCamera, BrLight};
-use glam;
+use engine::background::{Bmat34, BrCamera, BrLight, bra_to_radians};
+use engine::events::OrientPayload;
 use engine::fixedpoint::FixedScalar;
 use engine::material::BrMaterial;
 use engine::model::{BrVertex, Model};
+use engine::transform::Vec3;
+use glam;
 
 use crate::camera::Camera;
 use crate::lighting::GpuLight;
@@ -118,6 +120,43 @@ pub fn light_to_renderer(lite: &BrLight) -> GpuLight {
     }
 }
 
+/// Convert a BRender BMAT34 (4×3 affine matrix, row-major) to a glam `Mat4`.
+///
+/// BRender layout (4 rows × 3 cols):
+///   Row 0 = X-axis (right), Row 1 = Y-axis (up),
+///   Row 2 = Z-axis (forward), Row 3 = Translation.
+///
+/// glam `Mat4` is column-major; each BRender row becomes a glam column.
+pub fn bmat34_to_mat4(mat: &Bmat34) -> glam::Mat4 {
+    let f = |v: FixedScalar| v.0 as f32 / 65536.0;
+    glam::Mat4::from_cols(
+        glam::Vec4::new(f(mat.m[0][0]), f(mat.m[0][1]), f(mat.m[0][2]), 0.0),
+        glam::Vec4::new(f(mat.m[1][0]), f(mat.m[1][1]), f(mat.m[1][2]), 0.0),
+        glam::Vec4::new(f(mat.m[2][0]), f(mat.m[2][1]), f(mat.m[2][2]), 0.0),
+        glam::Vec4::new(f(mat.m[3][0]), f(mat.m[3][1]), f(mat.m[3][2]), 1.0),
+    )
+}
+
+/// Build a world-space translation matrix for an actor at a route point.
+///
+/// 3DMM world position = `route_point.position + actor.dxyz_full_rte`.
+pub fn actor_translation_mat4(route_pos: &Vec3, dxyz: &Vec3) -> glam::Mat4 {
+    let x = brs_to_f32(route_pos.x) + brs_to_f32(dxyz.x);
+    let y = brs_to_f32(route_pos.y) + brs_to_f32(dxyz.y);
+    let z = brs_to_f32(route_pos.z) + brs_to_f32(dxyz.z);
+    glam::Mat4::from_translation(glam::Vec3::new(x, y, z))
+}
+
+/// Build a rotation matrix from `AEV_ORIENT` / `AEV_ROTATE` Euler angles (BRA).
+///
+/// 3DMM applies rotations in X→Y→Z order (pitch → yaw → roll).
+pub fn orient_to_rotation_mat4(orient: &OrientPayload) -> glam::Mat4 {
+    let pitch = bra_to_radians(orient.xa.0);
+    let yaw   = bra_to_radians(orient.ya.0);
+    let roll  = bra_to_radians(orient.za.0);
+    glam::Mat4::from_euler(glam::EulerRot::XYZ, pitch, yaw, roll)
+}
+
 /// Convert a parsed BRender [`Model`] into a renderable [`Mesh`].
 ///
 /// Vertices are converted from fixed-point to f32.
@@ -139,10 +178,122 @@ pub fn model_to_mesh(model: &Model) -> Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::fixedpoint::FixedScalar;
+    use engine::background::Bmat34;
+    use engine::events::OrientPayload;
+    use engine::fixedpoint::{FixedAngle, FixedScalar};
     use engine::material::BrMaterial;
     use engine::model::{BrFaceFile, Bounds, ModelHeader, Model};
     use engine::transform::Vec3;
+
+    // ── bmat34_to_mat4 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn bmat34_identity_becomes_glam_identity() {
+        let m = bmat34_to_mat4(&Bmat34::IDENTITY);
+        // Diagonal = 1.0
+        assert!((m.col(0).x - 1.0).abs() < 1e-6, "col0.x");
+        assert!((m.col(1).y - 1.0).abs() < 1e-6, "col1.y");
+        assert!((m.col(2).z - 1.0).abs() < 1e-6, "col2.z");
+        assert!((m.col(3).w - 1.0).abs() < 1e-6, "col3.w");
+        // Off-diagonal = 0.0
+        assert!((m.col(0).y).abs() < 1e-6, "col0.y");
+        assert!((m.col(0).z).abs() < 1e-6, "col0.z");
+        assert!((m.col(3).x).abs() < 1e-6, "translation.x");
+        assert!((m.col(3).y).abs() < 1e-6, "translation.y");
+        assert!((m.col(3).z).abs() < 1e-6, "translation.z");
+    }
+
+    #[test]
+    fn bmat34_translation_goes_to_col3() {
+        let mut mat = Bmat34::IDENTITY;
+        mat.m[3][0] = FixedScalar(0x0003_0000); // 3.0
+        mat.m[3][1] = FixedScalar(0x0004_0000); // 4.0
+        mat.m[3][2] = FixedScalar(0x0005_0000); // 5.0
+        let m = bmat34_to_mat4(&mat);
+        assert!((m.col(3).x - 3.0).abs() < 1e-5, "tx={}", m.col(3).x);
+        assert!((m.col(3).y - 4.0).abs() < 1e-5, "ty={}", m.col(3).y);
+        assert!((m.col(3).z - 5.0).abs() < 1e-5, "tz={}", m.col(3).z);
+        assert!((m.col(3).w - 1.0).abs() < 1e-6, "tw={}", m.col(3).w);
+        // Rotation unchanged (identity)
+        assert!((m.col(0).x - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bmat34_rows_map_to_columns() {
+        // Row 0 (right) → col 0; Row 1 (up) → col 1; Row 2 (fwd) → col 2
+        let mut mat = Bmat34::IDENTITY;
+        // Set row 1 (up) to a non-trivial vector (0.0, 2.0, 0.0)
+        mat.m[1][1] = FixedScalar(0x0002_0000); // 2.0
+        let m = bmat34_to_mat4(&mat);
+        assert!((m.col(1).y - 2.0).abs() < 1e-5, "up.y={}", m.col(1).y);
+        assert!((m.col(1).x).abs() < 1e-6);
+        assert!((m.col(1).z).abs() < 1e-6);
+    }
+
+    // ── actor_translation_mat4 ───────────────────────────────────────────────
+
+    #[test]
+    fn actor_translation_combines_route_and_offset() {
+        let pos = Vec3 {
+            x: FixedScalar(0x0001_0000), // 1.0
+            y: FixedScalar(0x0002_0000), // 2.0
+            z: FixedScalar(0x0000_0000),
+        };
+        let dxyz = Vec3 {
+            x: FixedScalar(0x0000_8000), // 0.5
+            y: FixedScalar(0x0000_0000),
+            z: FixedScalar(-0x0001_0000), // -1.0
+        };
+        let m = actor_translation_mat4(&pos, &dxyz);
+        assert!((m.col(3).x - 1.5).abs() < 1e-5, "x={}", m.col(3).x);
+        assert!((m.col(3).y - 2.0).abs() < 1e-5, "y={}", m.col(3).y);
+        assert!((m.col(3).z - (-1.0)).abs() < 1e-5, "z={}", m.col(3).z);
+        assert!((m.col(3).w - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn actor_translation_zero_offset() {
+        let pos = Vec3 {
+            x: FixedScalar(0x0007_0000), // 7.0
+            y: FixedScalar(0x0000_0000),
+            z: FixedScalar(0x0003_0000), // 3.0
+        };
+        let m = actor_translation_mat4(&pos, &Vec3::ZERO);
+        assert!((m.col(3).x - 7.0).abs() < 1e-5);
+        assert!((m.col(3).y).abs() < 1e-5);
+        assert!((m.col(3).z - 3.0).abs() < 1e-5);
+    }
+
+    // ── orient_to_rotation_mat4 ──────────────────────────────────────────────
+
+    #[test]
+    fn orient_zero_angles_is_identity() {
+        let orient = OrientPayload {
+            xa: FixedAngle(0),
+            ya: FixedAngle(0),
+            za: FixedAngle(0),
+        };
+        let m = orient_to_rotation_mat4(&orient);
+        assert!((m.col(0).x - 1.0).abs() < 1e-5);
+        assert!((m.col(1).y - 1.0).abs() < 1e-5);
+        assert!((m.col(2).z - 1.0).abs() < 1e-5);
+        assert!((m.col(0).y).abs() < 1e-5);
+    }
+
+    #[test]
+    fn orient_quarter_turn_y() {
+        // 90° yaw (ya = 0x4000 = π/2)
+        let orient = OrientPayload {
+            xa: FixedAngle(0),
+            ya: FixedAngle(0x4000),
+            za: FixedAngle(0),
+        };
+        let m = orient_to_rotation_mat4(&orient);
+        // After 90° Y rotation: R_y(90°): col0 = [0,0,-1,0], col2 = [1,0,0,0]
+        assert!((m.col(0).z - (-1.0)).abs() < 1e-5, "col0.z={}", m.col(0).z);
+        assert!((m.col(2).x - 1.0).abs() < 1e-5, "col2.x={}", m.col(2).x);
+        assert!((m.col(1).y - 1.0).abs() < 1e-5, "col1.y={}", m.col(1).y);
+    }
 
     fn make_triangle_model() -> Model {
         let v0 = BrVertex {
