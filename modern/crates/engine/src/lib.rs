@@ -11,6 +11,7 @@ pub mod tag;
 pub mod transform;
 pub mod events;
 pub mod model;
+pub mod material;
 pub mod actor;
 pub mod scene;
 pub mod movie;
