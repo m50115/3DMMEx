@@ -1,4 +1,4 @@
-//! BRender model, material, camera and light → GPU conversion.
+//! BRender model, material, camera, light, and texture → GPU conversion.
 //!
 //! Converts engine domain types (fixed-point) to renderer types (f32).
 //! This is the boundary where BRS 16.16 → f32 and br_fraction i16 → f32.
@@ -8,6 +8,7 @@ use engine::events::OrientPayload;
 use engine::fixedpoint::FixedScalar;
 use engine::material::BrMaterial;
 use engine::model::{BrVertex, Model};
+use engine::tmap::{BrPixelType, BrTmap};
 use engine::transform::Vec3;
 use glam;
 
@@ -157,6 +158,109 @@ pub fn orient_to_rotation_mat4(orient: &OrientPayload) -> glam::Mat4 {
     glam::Mat4::from_euler(glam::EulerRot::XYZ, pitch, yaw, roll)
 }
 
+/// Convert a parsed [`BrTmap`] to an RGBA8 pixel buffer for GPU upload.
+///
+/// Returns `(width, height, rgba_bytes)` where `rgba_bytes` has length
+/// `width × height × 4`.
+///
+/// Pixel format handling:
+/// - `INDEX_8`: 8-bit index treated as greyscale (R=G=B=index, A=255).
+///   Full shade-table palette lookup is not implemented; greyscale is a
+///   safe stand-in for pipeline testing.
+/// - `RGB_555`: 5-5-5 packed → RGBA8 (each 5-bit channel expanded to 8-bit).
+/// - `RGB_565`: 5-6-5 packed → RGBA8.
+/// - `RGB_888`: 24-bit → RGBA8 (A=255).
+/// - `RGBX_888` / `RGBA_8888`: 32-bit → RGBA8 (X ignored, A=255).
+/// - Unknown formats: solid white (255,255,255,255) per pixel.
+///
+/// Row stride (`row_bytes`) is respected — only `width` pixels per row
+/// are read, skipping any padding bytes.
+pub fn tmap_to_rgba(tmap: &BrTmap) -> (u32, u32, Vec<u8>) {
+    let width     = tmap.width.max(0) as usize;
+    let height    = tmap.height.max(0) as usize;
+    let row_bytes = tmap.row_bytes.max(0) as usize;
+    let mut out   = Vec::with_capacity(width * height * 4);
+
+    match tmap.pixel_type_parsed() {
+        BrPixelType::Index8 => {
+            for row in 0..height {
+                let rs = row * row_bytes;
+                for col in 0..width {
+                    let idx = tmap.pixels[rs + col];
+                    out.push(idx); out.push(idx); out.push(idx); out.push(255);
+                }
+            }
+        }
+        BrPixelType::Rgb555 => {
+            for row in 0..height {
+                let rs = row * row_bytes;
+                for col in 0..width {
+                    let lo = tmap.pixels[rs + col * 2];
+                    let hi = tmap.pixels[rs + col * 2 + 1];
+                    let p  = u16::from_le_bytes([lo, hi]);
+                    let r = ((p >> 10) & 0x1F) as u8;
+                    let g = ((p >>  5) & 0x1F) as u8;
+                    let b = ( p        & 0x1F) as u8;
+                    // Expand 5-bit → 8-bit: shift up and replicate high bits into low bits
+                    out.push((r << 3) | (r >> 2));
+                    out.push((g << 3) | (g >> 2));
+                    out.push((b << 3) | (b >> 2));
+                    out.push(255);
+                }
+            }
+        }
+        BrPixelType::Rgb565 => {
+            for row in 0..height {
+                let rs = row * row_bytes;
+                for col in 0..width {
+                    let lo = tmap.pixels[rs + col * 2];
+                    let hi = tmap.pixels[rs + col * 2 + 1];
+                    let p  = u16::from_le_bytes([lo, hi]);
+                    let r = ((p >> 11) & 0x1F) as u8;
+                    let g = ((p >>  5) & 0x3F) as u8;
+                    let b = ( p        & 0x1F) as u8;
+                    out.push((r << 3) | (r >> 2));
+                    out.push((g << 2) | (g >> 4));
+                    out.push((b << 3) | (b >> 2));
+                    out.push(255);
+                }
+            }
+        }
+        BrPixelType::Rgb888 => {
+            for row in 0..height {
+                let rs = row * row_bytes;
+                for col in 0..width {
+                    let base = rs + col * 3;
+                    out.push(tmap.pixels[base]);
+                    out.push(tmap.pixels[base + 1]);
+                    out.push(tmap.pixels[base + 2]);
+                    out.push(255);
+                }
+            }
+        }
+        BrPixelType::RgbX888 | BrPixelType::Rgba8888 => {
+            for row in 0..height {
+                let rs = row * row_bytes;
+                for col in 0..width {
+                    let base = rs + col * 4;
+                    out.push(tmap.pixels[base]);
+                    out.push(tmap.pixels[base + 1]);
+                    out.push(tmap.pixels[base + 2]);
+                    out.push(255);
+                }
+            }
+        }
+        BrPixelType::Unknown(_) => {
+            // Solid white — unrecognised format; at least we get correct geometry.
+            for _ in 0..width * height {
+                out.extend_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+    }
+
+    (width as u32, height as u32, out)
+}
+
 /// Convert a parsed BRender [`Model`] into a renderable [`Mesh`].
 ///
 /// Vertices are converted from fixed-point to f32.
@@ -183,6 +287,7 @@ mod tests {
     use engine::fixedpoint::{FixedAngle, FixedScalar};
     use engine::material::BrMaterial;
     use engine::model::{BrFaceFile, Bounds, ModelHeader, Model};
+    use engine::tmap::{BrTmap, BR_PMT_INDEX_8, BR_PMT_RGB_565};
     use engine::transform::Vec3;
 
     // ── bmat34_to_mat4 ──────────────────────────────────────────────────────
@@ -525,6 +630,71 @@ mod tests {
         let mesh = model_to_mesh(&model);
         // 0x0001_6A0A / 65536 ≈ 1.414
         assert!((mesh.radius - 1.414).abs() < 0.01);
+    }
+
+    // ── tmap_to_rgba ─────────────────────────────────────────────────────────
+
+    fn make_tmap(pixel_type: u8, width: i16, height: i16, row_bytes: i16, pixels: Vec<u8>) -> BrTmap {
+        BrTmap { row_bytes, pixel_type, flags: 0, base_x: 0, base_y: 0,
+                 width, height, origin_x: 0, origin_y: 0, pixels }
+    }
+
+    #[test]
+    fn index8_greyscale_output() {
+        // 2×1 INDEX_8 image: pixels [0, 255]
+        let tmap = make_tmap(BR_PMT_INDEX_8, 2, 1, 2, vec![0x00, 0xFF]);
+        let (w, h, rgba) = tmap_to_rgba(&tmap);
+        assert_eq!(w, 2);
+        assert_eq!(h, 1);
+        assert_eq!(rgba.len(), 8); // 2×1×4
+        // First pixel: black (0,0,0,255)
+        assert_eq!(&rgba[0..4], &[0, 0, 0, 255]);
+        // Second pixel: white (255,255,255,255)
+        assert_eq!(&rgba[4..8], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn index8_respects_row_stride() {
+        // 2×2 INDEX_8 with cbRow=4 (2 active + 2 padding per row)
+        let pixels = vec![
+            0x10, 0x20, 0xAA, 0xAA, // row 0: [0x10, 0x20] + 2 pad bytes
+            0x30, 0x40, 0xAA, 0xAA, // row 1: [0x30, 0x40] + 2 pad bytes
+        ];
+        let tmap = make_tmap(BR_PMT_INDEX_8, 2, 2, 4, pixels);
+        let (w, h, rgba) = tmap_to_rgba(&tmap);
+        assert_eq!(w, 2);
+        assert_eq!(h, 2);
+        assert_eq!(rgba.len(), 16);
+        // Row 0 pixel 0: 0x10 greyscale
+        assert_eq!(&rgba[0..4], &[0x10, 0x10, 0x10, 255]);
+        // Row 1 pixel 0: 0x30 greyscale — padding bytes skipped
+        assert_eq!(&rgba[8..12], &[0x30, 0x30, 0x30, 255]);
+    }
+
+    #[test]
+    fn rgb565_expands_to_rgba() {
+        // One pixel: pure red in RGB565 = 0b11111_000000_00000 = 0xF800
+        let p = 0xF800u16.to_le_bytes();
+        let tmap = make_tmap(BR_PMT_RGB_565, 1, 1, 2, p.to_vec());
+        let (w, h, rgba) = tmap_to_rgba(&tmap);
+        assert_eq!(w, 1);
+        assert_eq!(h, 1);
+        assert_eq!(rgba.len(), 4);
+        // R=31 → (31<<3)|(31>>2) = 248|7 = 255; G=0; B=0; A=255
+        assert_eq!(rgba[0], 255, "R");
+        assert_eq!(rgba[1], 0,   "G");
+        assert_eq!(rgba[2], 0,   "B");
+        assert_eq!(rgba[3], 255, "A");
+    }
+
+    #[test]
+    fn tmap_rgba_output_length() {
+        // Any format: output must be width*height*4 bytes
+        let tmap = make_tmap(BR_PMT_INDEX_8, 8, 8, 8, vec![0u8; 64]);
+        let (w, h, rgba) = tmap_to_rgba(&tmap);
+        assert_eq!(w, 8);
+        assert_eq!(h, 8);
+        assert_eq!(rgba.len(), 8 * 8 * 4);
     }
 
     #[test]

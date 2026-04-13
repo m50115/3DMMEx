@@ -12,6 +12,7 @@ pub mod transform;
 pub mod events;
 pub mod model;
 pub mod material;
+pub mod tmap;
 pub mod background;
 pub mod actor;
 pub mod scene;

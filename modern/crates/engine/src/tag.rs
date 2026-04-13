@@ -39,6 +39,11 @@ pub const CTG_CMTL: u32 = u32::from_be_bytes(*b"CMTL");
 /// Action definition chunk.
 pub const CTG_ACTN: u32 = u32::from_be_bytes(*b"ACTN");
 
+/// BRender pixelmap / texture chunk. On-disk tag = 'TMAP'.
+pub const CTG_TMAP: u32 = u32::from_be_bytes(*b"TMAP");
+/// Texture transform (2D matrix applied to UV coordinates). On-disk tag = 'TXXF'.
+pub const CTG_TXXF: u32 = u32::from_be_bytes(*b"TXXF");
+
 // ── Background sub-chunks ───────────────────────────────────────────────────
 
 /// Camera view chunk (inside BKGD). Tag = 'CAM ' (space-padded).

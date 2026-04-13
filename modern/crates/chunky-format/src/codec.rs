@@ -195,21 +195,49 @@ fn decompress_kcd2(src: &[u8], expected: usize) -> Result<Vec<u8>> {
         if !bits.peek_bit() {
             // ── Literal block ─────────────────────────────────────────
             bits.skip_bit();
-            // `count` bytes follow as literals (byte-aligned reading)
-            for _ in 0..=count {
-                if out.len() >= expected { break; }
-                let byte = bits.read(8) as u8;
-                out.push(byte);
+            // KCD2 byte-alignment trick (C++ _FDecode2):
+            // The encoder aligns the stream to a byte boundary after the
+            // discriminator bit.  When the discriminator does NOT fall on the
+            // last bit of its byte the LAST literal is split:
+            //   [lo: (8−k) bits][body: `count` bytes][hi: k bits]
+            //   last_byte = lo | (hi << (8−k))
+            // When the discriminator IS the last bit of its byte (k==0),
+            // the stream is already aligned and all count+1 literals follow
+            // as plain bytes.
+            let k = (bits.bit_pos % 8) as u32;
+            if k == 0 {
+                // Byte-aligned: straightforward read of count+1 literals
+                for _ in 0..=count {
+                    if out.len() >= expected { break; }
+                    out.push(bits.read(8) as u8);
+                }
+            } else {
+                // Not byte-aligned: last literal is split across a byte boundary
+                let lo = bits.read(8 - k);          // low (8−k) bits of last literal
+                let mut body = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    body.push(bits.read(8) as u8);  // first `count` literals
+                }
+                let hi  = bits.read(k);             // high k bits of last literal
+                let last_byte = lo as u8 | ((hi as u8) << (8 - k));
+                for b in body {
+                    if out.len() < expected { out.push(b); }
+                }
+                if out.len() < expected { out.push(last_byte); }
             }
         } else {
             // ── Match ─────────────────────────────────────────────────
             bits.skip_bit();
-            let length = count + 2;
 
             let offset = read_offset(&mut bits)?;
             if offset == 0 {
                 break;
             }
+
+            // C++ _FDecode2: Tier-3 offsets get an extra +1 on the match length
+            // (cb++ inside the else-branch for Tier 3, codkauai.cpp line 935).
+            let tier3_bonus = if offset >= BASE_TIER3 { 1 } else { 0 };
+            let length = count + 2 + tier3_bonus;
 
             copy_match(&mut out, offset as usize, length as usize)?;
         }
@@ -226,29 +254,41 @@ fn decompress_kcd2(src: &[u8], expected: usize) -> Result<Vec<u8>> {
 
 /// Read offset using the 4-tier encoding (same for KCDC and KCD2).
 ///
-/// Returns 0 as a terminator signal (for KCDC's 20-bit 0xFFFFF case).
+/// Called after the match bit (1) has already been consumed.
+/// Prefix bits (excluding the match bit):
+///   Tier 0: "0"   + 6-bit data  → offset 0x01..=0x40
+///   Tier 1: "10"  + 9-bit data  → offset 0x41..=0x240
+///   Tier 2: "110" + 12-bit data → offset 0x241..=0x1240
+///   Tier 3: "111" + 20-bit data → offset 0x1241..=large (0xFFFFF = terminator)
+///
+/// C++ reference: codkauai.cpp _FDecode / _FDecode2 — each tier skips
+///   (match_bit + N discriminator bits) where the match bit is already consumed
+///   by the caller, so we skip exactly N bits here.
+///
+/// Returns 0 as a terminator signal (for the 20-bit 0xFFFFF case).
 fn read_offset(bits: &mut BitReader) -> Result<u32> {
     if bits.peek(1) == 0 {
-        // Tier 0: 01 + 6 bits → 0x01..=0x40
+        // Tier 0: prefix "0" (1 bit) + 6 data bits
         bits.skip_bit();
         Ok(bits.read(BITS_TIER0) + BASE_TIER0)
     } else if bits.peek(2) & 0b10 == 0 {
-        // Tier 1: 011 + 9 bits → 0x41..=0x240
+        // Tier 1: prefix "10" (2 bits) + 9 data bits
         bits.advance(1); // skip the leading 1
         bits.skip_bit(); // skip the 0
         Ok(bits.read(BITS_TIER1) + BASE_TIER1)
     } else if bits.peek(3) & 0b100 == 0 {
-        // Tier 2: 0111 + 12 bits → 0x241..=0x1240
-        bits.advance(2);
-        bits.skip_bit();
+        // Tier 2: prefix "110" (3 bits) + 12 data bits
+        bits.advance(2); // skip the two 1s
+        bits.skip_bit(); // skip the 0
         Ok(bits.read(BITS_TIER2) + BASE_TIER2)
     } else {
-        // Tier 3: 1111 + 20 bits
+        // Tier 3: prefix "111" (3 bits) + 20 data bits
+        // C++ _FDecode: ibit += 4 (match + 3 discriminators) then reads 20 bits.
+        // Since the match bit is already consumed by our caller, we skip only 3 bits.
         bits.advance(3);
-        bits.skip_bit();
         let raw = bits.read(BITS_TIER3);
         if raw == (1 << BITS_TIER3) - 1 {
-            Ok(0) // terminator
+            Ok(0) // terminator: all 20 bits set = 0xFFFFF
         } else {
             Ok(raw + BASE_TIER3)
         }

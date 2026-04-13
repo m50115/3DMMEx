@@ -9,7 +9,9 @@
       "Bash(cargo check:*)",
       "Bash(awk '{sum += $4} END {print \"Total tests:\", sum}')",
       "Bash(grep -r \"GLLT\\\\|GL.*LITE\" /Users/devuser/www/3DMMEx/inc/*.h)",
-      "Bash(xxd -l 512 /Users/devuser/www/3DMMEx/../content-files/bkgds.3cn)"
+      "Bash(xxd -l 512 /Users/devuser/www/3DMMEx/../content-files/bkgds.3cn)",
+      "Bash(find:*)",
+      "Bash(awk -F'[. ]' '{sum+=$5} END {print \"Total tests passed:\", sum}')"
     ]
   }
 }
