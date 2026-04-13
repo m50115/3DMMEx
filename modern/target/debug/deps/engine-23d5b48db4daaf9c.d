@@ -1,0 +1,8 @@
+/Users/devuser/www/3DMMEx/modern/target/debug/deps/engine-23d5b48db4daaf9c.d: crates/engine/src/lib.rs crates/engine/src/fixedpoint.rs
+
+/Users/devuser/www/3DMMEx/modern/target/debug/deps/libengine-23d5b48db4daaf9c.rlib: crates/engine/src/lib.rs crates/engine/src/fixedpoint.rs
+
+/Users/devuser/www/3DMMEx/modern/target/debug/deps/libengine-23d5b48db4daaf9c.rmeta: crates/engine/src/lib.rs crates/engine/src/fixedpoint.rs
+
+crates/engine/src/lib.rs:
+crates/engine/src/fixedpoint.rs:

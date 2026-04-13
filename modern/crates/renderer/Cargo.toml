@@ -1,0 +1,11 @@
+[package]
+name = "renderer"
+description = "wgpu-based 3D renderer reproducing BRender output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine = { workspace = true }
+log = { workspace = true }
+# wgpu and winit will be added in Phase 3

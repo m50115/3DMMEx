@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(file /Users/devuser/www/3DMMEx/samples/*.3mm)",
+      "Bash(cargo test:*)",
+      "Bash(sed -i '' 's|//! \\\\`\\\\`\\\\`$|//! ```text|' crates/chunky-format/src/codec.rs)",
+      "Bash(sed -i '' 's|6 × 0xFF|6 x 0xFF|' crates/chunky-format/src/codec.rs)",
+      "Bash(cargo run:*)"
+    ]
+  }
+}

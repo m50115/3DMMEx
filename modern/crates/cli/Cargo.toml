@@ -1,0 +1,12 @@
+[package]
+name = "cli"
+description = "CLI tools for inspecting and validating 3D Movie Maker files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chunky-format = { workspace = true }
+engine = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
