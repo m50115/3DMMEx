@@ -10,8 +10,8 @@ use renderer::convert::model_to_mesh;
 
 const TMPLS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/tmpls.3cn");
 
-/// Helper: find the first BMDL chunk with valid geometry.
-fn find_valid_model(cfl: &ChunkyFile) -> Option<Model> {
+/// Helper: find the first BMDL chunk with valid renderable geometry.
+fn find_renderable_model(cfl: &ChunkyFile) -> Option<Model> {
     for entry in cfl.chunks.iter().filter(|c| c.id.ctg == CTG_BMDL) {
         let data = match cfl.get_chunk_data(entry.id.ctg, entry.id.cno) {
             Ok(d) => d,
@@ -23,14 +23,8 @@ fn find_valid_model(cfl: &ChunkyFile) -> Option<Model> {
             Ok(m) => m,
             Err(_) => continue,
         };
-        if model.header.vertex_count == 0 || model.header.face_count == 0 {
-            continue;
-        }
-
-        let nv = model.header.vertex_count as u16;
-        let valid = model.faces.iter()
-            .all(|f| f.vertices.iter().all(|&vi| vi < nv));
-        if valid {
+        if model.header.vertex_count == 0 { continue; }
+        if model.has_valid_faces() {
             return Some(model);
         }
     }
@@ -44,7 +38,7 @@ fn full_pipeline_model_to_mesh() {
     let mut reader = BufReader::new(file);
     let cfl = ChunkyFile::read(&mut reader).unwrap();
 
-    let model = find_valid_model(&cfl).expect("No valid BMDL found");
+    let model = find_renderable_model(&cfl).expect("No renderable BMDL found");
 
     let mesh = model_to_mesh(&model);
 
@@ -67,7 +61,7 @@ fn full_pipeline_model_to_mesh() {
         }
     }
 
-    // Normals are finite (may be zero for unprepared models)
+    // Normals are finite
     for v in &mesh.vertices {
         for &c in &v.normal {
             assert!(c.is_finite(), "Non-finite normal: {:?}", v.normal);
@@ -90,7 +84,7 @@ fn full_pipeline_model_to_mesh() {
 }
 
 #[test]
-fn convert_multiple_valid_models() {
+fn convert_all_renderable_models() {
     let file = File::open(TMPLS_PATH)
         .unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
@@ -98,27 +92,21 @@ fn convert_multiple_valid_models() {
 
     let mut converted = 0u32;
 
-    for entry in cfl.chunks.iter().filter(|c| c.id.ctg == CTG_BMDL).take(500) {
+    for entry in cfl.chunks.iter().filter(|c| c.id.ctg == CTG_BMDL) {
         let data = match cfl.get_chunk_data(entry.id.ctg, entry.id.cno) {
             Ok(d) => d,
             Err(_) => continue,
         };
-        if data.len() < 80 { continue; }
 
         let model = match Model::from_bytes(&data) {
             Ok(m) => m,
             Err(_) => continue,
         };
+        if !model.has_valid_faces() { continue; }
         if model.header.vertex_count == 0 { continue; }
-
-        let nv = model.header.vertex_count as u16;
-        let valid = model.faces.iter()
-            .all(|f| f.vertices.iter().all(|&vi| vi < nv));
-        if !valid { continue; }
 
         let mesh = model_to_mesh(&model);
 
-        // Basic sanity
         assert_eq!(mesh.vertices.len(), model.vertices.len());
         assert_eq!(mesh.index_count(), model.faces.len() as u32 * 3);
         assert!(mesh.radius >= 0.0);
@@ -126,5 +114,8 @@ fn convert_multiple_valid_models() {
         converted += 1;
     }
 
-    assert!(converted > 10, "Only converted {converted} models, expected >10");
+    assert!(
+        converted > 150,
+        "Only converted {converted} renderable models, expected >150"
+    );
 }

@@ -237,6 +237,13 @@ impl BrFaceFile {
 // ── Model ──────────────────────────────────────────────────────────────────
 
 /// Parsed BRender model: header + vertex array + face array.
+///
+/// Models come in two flavours on disk:
+/// - **Prepared** (`radius > 0`): pre-processed by BRender. Face indices are
+///   valid references into the vertex array.
+/// - **Unprepared** (`radius == 0`): raw content-tool output. Face data may
+///   contain runtime garbage (pointer values, uninitialised fields). Vertex
+///   positions are still usable but face indices are NOT reliable.
 #[derive(Debug, Clone)]
 pub struct Model {
     pub header: ModelHeader,
@@ -245,9 +252,12 @@ pub struct Model {
 }
 
 impl Model {
-    /// Parse a MODL chunk from raw bytes (after decompression).
+    /// Parse a MODL/BMDL chunk from raw bytes (after decompression).
     ///
     /// Expected layout: `[MODLF:48][BrVertex × cver][BrFaceFile × cfac]`
+    ///
+    /// Returns `Ok` for any structurally valid chunk (correct size, bo=LE).
+    /// Use [`has_valid_faces`] to check whether face data is usable.
     pub fn from_bytes(data: &[u8]) -> EngineResult<Self> {
         let header = ModelHeader::from_le_bytes(data)?;
 
@@ -284,6 +294,22 @@ impl Model {
         }
 
         Ok(Self { header, vertices, faces })
+    }
+
+    /// Whether this model was pre-prepared by BRender (radius > 0).
+    ///
+    /// Only prepared models have reliable face vertex indices. Unprepared
+    /// models (radius == 0) were dumped from the content pipeline before
+    /// BrModelPrepare; their face data contains runtime pointer values.
+    pub fn is_prepared(&self) -> bool {
+        self.header.radius.0 > 0
+    }
+
+    /// Check that every face vertex index is within the vertex array.
+    pub fn has_valid_faces(&self) -> bool {
+        let nv = self.header.vertex_count as u16;
+        self.faces.iter()
+            .all(|f| f.vertices.iter().all(|&vi| vi < nv))
     }
 
     /// Serialize back to bytes (for round-trip testing).
