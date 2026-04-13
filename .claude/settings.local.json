@@ -5,7 +5,9 @@
       "Bash(cargo test:*)",
       "Bash(sed -i '' 's|//! \\\\`\\\\`\\\\`$|//! ```text|' crates/chunky-format/src/codec.rs)",
       "Bash(sed -i '' 's|6 × 0xFF|6 x 0xFF|' crates/chunky-format/src/codec.rs)",
-      "Bash(cargo run:*)"
+      "Bash(cargo run:*)",
+      "Bash(cargo check:*)",
+      "Bash(awk '{sum += $4} END {print \"Total tests:\", sum}')"
     ]
   }
 }

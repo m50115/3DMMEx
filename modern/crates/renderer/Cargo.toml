@@ -8,4 +8,12 @@ license.workspace = true
 [dependencies]
 engine = { workspace = true }
 log = { workspace = true }
-# wgpu and winit will be added in Phase 3
+wgpu = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+glam = { workspace = true }
+env_logger = { workspace = true }
+
+[dev-dependencies]
+chunky-format = { path = "../chunky-format" }

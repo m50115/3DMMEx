@@ -21,6 +21,23 @@ pub const CTG_MSND: u32 = u32::from_be_bytes(*b"MSND");
 /// Roll-call (GST) chunk — stored under MVIE with kchidGstMactr.
 pub const CTG_GST: u32 = u32::from_be_bytes(*b"GST\0");
 
+// ── BRender asset chunk types ───────────────────────────────────────────────
+
+/// BRender model data chunk (on-disk tag for mesh geometry).
+pub const CTG_BMDL: u32 = u32::from_be_bytes(*b"BMDL");
+/// MODL wrapper class tag (used by C++ BACO system, rarely on disk).
+pub const CTG_MODL: u32 = u32::from_be_bytes(*b"MODL");
+/// Template (actor definition: body, costume, action references).
+pub const CTG_TMPL: u32 = u32::from_be_bytes(*b"TMPL");
+/// Background (camera, lights, positions).
+pub const CTG_BKGD: u32 = u32::from_be_bytes(*b"BKGD");
+/// BRender material (on-disk chunk tag).
+pub const CTG_BMTL: u32 = u32::from_be_bytes(*b"BMTL");
+/// Costume material (CMTL) — references BMTL with costume metadata.
+pub const CTG_CMTL: u32 = u32::from_be_bytes(*b"CMTL");
+/// Action definition chunk.
+pub const CTG_ACTN: u32 = u32::from_be_bytes(*b"ACTN");
+
 // ── Actor sub-chunks ────────────────────────────────────────────────────────
 
 /// GL of route points for an actor.

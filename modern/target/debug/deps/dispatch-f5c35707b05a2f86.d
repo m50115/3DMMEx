@@ -1,0 +1,10 @@
+/Users/devuser/www/3DMMEx/modern/target/debug/deps/dispatch-f5c35707b05a2f86.d: /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/lib.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/ffi.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/group.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/queue.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/once.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/sem.rs
+
+/Users/devuser/www/3DMMEx/modern/target/debug/deps/libdispatch-f5c35707b05a2f86.rmeta: /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/lib.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/ffi.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/group.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/queue.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/once.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/sem.rs
+
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/lib.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/ffi.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/group.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/queue.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/once.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dispatch-0.2.0/src/sem.rs:

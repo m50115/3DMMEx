@@ -25,6 +25,13 @@ env_logger = "0.11"
 # Binary parsing
 binrw = "0.14"
 
+# 3D Rendering
+wgpu = "24"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.29"
+
 # Testing
 pretty_assertions = "1"
 tempfile = "3"
