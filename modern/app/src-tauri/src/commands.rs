@@ -182,22 +182,17 @@ pub fn render_demo_frame(
     Ok(format!("data:image/png;base64,{b64}"))
 }
 
-/// Render actor models for a specific scene at a given frame.
-///
-/// `frame` is 1-indexed (matches 3DMM's internal nfrm_first/nfrm_last).
-/// Actors whose active range [nfrm_first, nfrm_last] does not include
-/// `frame` are omitted from the render.
-#[tauri::command]
-pub fn render_scene_frame(
+/// Core render path: collect actors for a scene/frame, upload meshes, GPU render.
+/// Returns raw RGBA8 pixels (width × height × 4 bytes).
+/// Used by both the IPC command (for compat) and the `stream://` URI handler (hot path).
+pub(crate) fn render_to_rgba(
+    state: &AppState,
     scene_idx: usize,
     frame: i32,
     width: u32,
     height: u32,
-    state: State<AppState>,
-) -> Result<String, String> {
+) -> Result<Vec<u8>, String> {
     // --- Step 1: locate SCEN chunk and extract actor tag_tmpls + transforms --
-    // Each entry: (tmpl_ctg, tmpl_cno, world_transform)
-    // world_transform = translation by (route[0].position + dxyz_full_rte).
     let tag_tmpls: Vec<(u32, u32, glam::Mat4)> = {
         let guard = state.loaded_file.lock().unwrap();
         let lf = guard.as_ref().ok_or("No file loaded")?;
@@ -220,18 +215,12 @@ pub fn render_scene_frame(
                 Err(_) => continue,
             };
             if !actf.tag_tmpl.is_null() && actf.tag_tmpl.cno != 0 {
-                // Frame filter: frames are 1-indexed in 3DMM.
-                // Skip actors whose active range doesn't include this frame.
                 let has_range = actf.nfrm_last > actf.nfrm_first;
                 if has_range && (frame < actf.nfrm_first || frame > actf.nfrm_last) {
                     continue;
                 }
 
-                // Parse PATH GL sub-chunk to get route[0] world position.
-                // GL header: [bo:i16][osk:i16][cbEntry:i32=16][ivMac:i32] + RoutePoint×ivMac
                 let translation = 'path: {
-                    // Find PATH child of this ACTR chunk within the main .3mm file.
-                    // The ACTR chunk in cfl.chunks has children; find one with CTG_PATH.
                     let actr_top = lf.cfl.chunks.iter()
                         .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
                     let path_child = actr_top
@@ -239,7 +228,7 @@ pub fn render_scene_frame(
                     if let Some(pc) = path_child {
                         if let Ok(path_data) = lf.cfl.get_chunk_data(pc.id.ctg, pc.id.cno) {
                             const GL_HDR: usize = 12;
-                            const RPT_SIZE: usize = RoutePoint::SIZE; // 16
+                            const RPT_SIZE: usize = RoutePoint::SIZE;
                             if path_data.len() >= GL_HDR + RPT_SIZE {
                                 let iv_mac = i32::from_le_bytes(
                                     path_data[8..12].try_into().unwrap()
@@ -264,8 +253,6 @@ pub fn render_scene_frame(
                     glam::Mat4::IDENTITY
                 };
 
-                // Parse GGAE GG sub-chunk to get actor orientation at this frame.
-                // Orientation = last AEV_ORIENT event where nfrm <= frame (keyframe semantics).
                 let rotation = 'ggae: {
                     let actr_top = lf.cfl.chunks.iter()
                         .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
@@ -299,15 +286,14 @@ pub fn render_scene_frame(
                     glam::Mat4::IDENTITY
                 };
 
-                let transform = translation * rotation;
-                tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, transform));
+                tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, translation * rotation));
             }
         }
         tags
     };
 
     if tag_tmpls.is_empty() {
-        return Err(format!("No actors with valid templates"));
+        return Err("No actors with valid templates".to_string());
     }
 
     // --- Step 2: look up cached tmpls.3cn + GPU renderer ---------------------
@@ -318,8 +304,6 @@ pub fn render_scene_frame(
     let gpu = gpu_guard.as_mut()
         .ok_or_else(|| "No GPU adapter available".to_string())?;
 
-    // For each actor: ensure its BMDL mesh is uploaded (no-op if cached).
-    // Build scene_entries: ((CTG_BMDL, bmdl_cno), world_transform).
     let mut scene_entries: Vec<((u32, u32), glam::Mat4)> = Vec::new();
     let mut diag: Vec<String> = Vec::new();
 
@@ -342,7 +326,6 @@ pub fn render_scene_frame(
                     found_key = Some(bmdl_key);
                     break;
                 }
-                // Not cached yet — parse and upload once.
                 if let Ok(data) = tmpls.get_chunk_data(ch.id.ctg, ch.id.cno) {
                     if data.len() >= 80 {
                         if let Ok(m) = Model::from_bytes(&data) {
@@ -388,12 +371,26 @@ pub fn render_scene_frame(
             if diag.is_empty() { "no actors matched".into() } else { diag.join("; ") }));
     }
 
-    // --- Step 3: GPU render using cached mesh buffers → PNG data URL --------
+    // --- Step 3: GPU render --------------------------------------------------
     let rgba = gpu.render_scene(&scene_entries, width, height);
     if rgba.is_empty() {
         return Err("Render produced empty output".into());
     }
+    Ok(rgba)
+}
 
+/// Render actor models for a specific scene at a given frame.
+/// Returns a `data:image/png;base64,...` string. Kept for IPC compatibility;
+/// the hot path during playback goes through the `stream://` URI scheme instead.
+#[tauri::command]
+pub fn render_scene_frame(
+    scene_idx: usize,
+    frame: i32,
+    width: u32,
+    height: u32,
+    state: State<AppState>,
+) -> Result<String, String> {
+    let rgba = render_to_rgba(state.inner(), scene_idx, frame, width, height)?;
     let png_bytes = encode_rgba_to_png(&rgba, width, height)?;
     let b64 = base64::prelude::BASE64_STANDARD.encode(&png_bytes);
     Ok(format!("data:image/png;base64,{b64}"))
@@ -487,6 +484,47 @@ pub fn play_sound(cno: u32, state: State<AppState>) -> Result<(), String> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Encode raw RGBA8 pixels to 24-bit BMP bytes (no compression).
+/// Uses negative biHeight so pixel rows are top-to-bottom (matches wgpu output).
+/// For 640×480 this takes ~1ms vs ~37ms for PNG — eliminates the encode bottleneck.
+pub(crate) fn encode_rgba_to_bmp(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let row_bytes = width as usize * 3;
+    let row_padded = (row_bytes + 3) & !3; // BMP rows must be 4-byte aligned
+    let pixel_data_size = row_padded * height as usize;
+    let file_size = 54 + pixel_data_size;
+
+    let mut bmp = vec![0u8; file_size];
+
+    // BITMAPFILEHEADER (14 bytes)
+    bmp[0..2].copy_from_slice(b"BM");
+    bmp[2..6].copy_from_slice(&(file_size as u32).to_le_bytes());
+    // bytes 6-9: reserved = 0
+    bmp[10..14].copy_from_slice(&54u32.to_le_bytes()); // pixel data offset
+
+    // BITMAPINFOHEADER (40 bytes)
+    bmp[14..18].copy_from_slice(&40u32.to_le_bytes());   // biSize
+    bmp[18..22].copy_from_slice(&(width as i32).to_le_bytes());
+    bmp[22..26].copy_from_slice(&(-(height as i32)).to_le_bytes()); // negative = top-down
+    bmp[26..28].copy_from_slice(&1u16.to_le_bytes());    // biPlanes
+    bmp[28..30].copy_from_slice(&24u16.to_le_bytes());   // biBitCount
+    // bytes 30-53: compression=0, sizeImage, DPI, clrUsed, clrImportant = 0
+    bmp[34..38].copy_from_slice(&(pixel_data_size as u32).to_le_bytes());
+
+    // Pixel data: RGBA → BGR, with row padding
+    let pixel_start = 54;
+    for y in 0..height as usize {
+        let row_dst = pixel_start + y * row_padded;
+        for x in 0..width as usize {
+            let src = (y * width as usize + x) * 4;
+            let dst = row_dst + x * 3;
+            bmp[dst]     = rgba[src + 2]; // B
+            bmp[dst + 1] = rgba[src + 1]; // G
+            bmp[dst + 2] = rgba[src];     // R
+        }
+    }
+    bmp
+}
 
 /// Encode raw RGBA8 pixels to PNG bytes.
 fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {

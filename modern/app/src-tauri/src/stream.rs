@@ -1,0 +1,64 @@
+//! `stream://` URI scheme handler.
+//!
+//! Registers a custom WKWebView protocol so the frontend can load rendered
+//! frames as `<img src="stream://localhost/frame/{scene}/{frame}">`.
+//!
+//! This eliminates the Phase 6a bottleneck (PNG encode + base64 + IPC):
+//!   Before: GPU(3ms) + PNG-encode(37ms) + base64 + IPC JSON = ~40ms/frame (~25fps)
+//!   After:  GPU(3ms) + BMP-encode(<1ms) + binary URI response = ~4ms/frame (~250fps theoretical)
+
+use tauri::{http, Manager, UriSchemeContext, Runtime};
+
+use crate::commands::{encode_rgba_to_bmp, render_to_rgba};
+use crate::state::AppState;
+
+/// Handler registered via `tauri::Builder::register_uri_scheme_protocol("stream", ...)`.
+///
+/// URL format: `stream://localhost/frame/{scene_idx}/{frame}`
+/// Returns a 24-bit BMP image with Content-Type: image/bmp.
+pub fn handle<R: Runtime>(
+    ctx: UriSchemeContext<'_, R>,
+    request: http::Request<Vec<u8>>,
+) -> http::Response<Vec<u8>> {
+    let path = request.uri().path(); // e.g. "/frame/0/5"
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+
+    // Expect: ["frame", "{scene_idx}", "{frame}"]
+    if segments.len() < 3 || segments[0] != "frame" {
+        return error_response(400, b"bad path: expected /frame/{scene}/{frame}");
+    }
+
+    let scene_idx: usize = match segments[1].parse() {
+        Ok(v) => v,
+        Err(_) => return error_response(400, b"bad scene index"),
+    };
+    let frame: i32 = match segments[2].parse() {
+        Ok(v) => v,
+        Err(_) => return error_response(400, b"bad frame index"),
+    };
+
+    let app = ctx.app_handle();
+    let state = app.state::<AppState>();
+
+    let t0 = std::time::Instant::now();
+    let rgba = match render_to_rgba(state.inner(), scene_idx, frame, 640, 480) {
+        Ok(r) => r,
+        Err(e) => return error_response(500, e.as_bytes()),
+    };
+    let bmp = encode_rgba_to_bmp(&rgba, 640, 480);
+    eprintln!("[PERF-6b] scene={scene_idx} frame={frame} total={}ms", t0.elapsed().as_millis());
+
+    http::Response::builder()
+        .header("Content-Type", "image/bmp")
+        .header("Cache-Control", "no-store")
+        .body(bmp)
+        .unwrap()
+}
+
+fn error_response(status: u16, body: &[u8]) -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(status)
+        .header("Content-Type", "text/plain")
+        .body(body.to_vec())
+        .unwrap()
+}

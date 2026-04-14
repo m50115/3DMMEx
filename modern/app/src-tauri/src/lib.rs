@@ -1,5 +1,6 @@
 mod commands;
 mod state;
+mod stream;
 
 use state::AppState;
 
@@ -8,6 +9,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .register_uri_scheme_protocol("stream", stream::handle)
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::open_file,

@@ -1,22 +1,38 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import { openFile, getSceneList, renderSceneFrame, listSounds, playSound } from "../lib/engine";
+import { openFile, getSceneList, listSounds, playSound } from "../lib/engine";
 import type { MovieInfo, SceneInfo, SoundEntry } from "../lib/types";
 import { Timeline } from "./Timeline";
 import { Viewport } from "./Viewport";
+
+/** Build a stream:// URL for a given scene/frame. Cache-bust with timestamp.
+ *  frame is 0-indexed in frontend; backend expects 1-indexed (3DMM convention). */
+function streamUrl(scene: number, frame: number): string {
+  return `stream://localhost/frame/${scene}/${frame + 1}?t=${Date.now()}`;
+}
+
+/** Resolve when the img element fires load, reject on error. */
+function waitForLoad(img: HTMLImageElement): Promise<void> {
+  return new Promise((resolve, reject) => {
+    img.addEventListener("load",  () => resolve(), { once: true });
+    img.addEventListener("error", () => reject(new Error("frame render error")), { once: true });
+  });
+}
 
 export function Studio() {
   const [movie, setMovie] = useState<MovieInfo | null>(null);
   const [scenes, setScenes] = useState<SceneInfo[]>([]);
   const [activeScene, setActiveScene] = useState(0);
-  const [frameDataUrl, setFrameDataUrl] = useState<string | null>(null);
+  const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [frameLoading, setFrameLoading] = useState(false);
   const [frameError, setFrameError] = useState<string | null>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
   const [sounds, setSounds] = useState<SoundEntry[]>([]);
   const [statusMsg, setStatusMsg] = useState("Ready");
   const [currentFrame, setCurrentFrame] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [fps, setFps] = useState<number | null>(null);
 
   // Playback loop — recursive setTimeout so frames don't queue when render is slow.
   const playingRef = useRef(playing);
@@ -41,19 +57,28 @@ export function Studio() {
           return;
         }
         if (active) setCurrentFrame(f);
+
+        const img = imgRef.current;
+        if (!img) return;
+
+        const t0 = performance.now();
+        // Set stream:// src — WKWebView fetches it, Rust renders → returns BMP bytes
+        img.src = streamUrl(activeScene, f);
         try {
-          const url = await renderSceneFrame(activeScene, f, 640, 480);
-          if (active) { setFrameDataUrl(url); setFrameError(null); }
+          await waitForLoad(img);
+          const elapsed = performance.now() - t0;
+          if (active) {
+            setFrameError(null);
+            setFps(Math.round(1000 / elapsed));
+          }
         } catch (err) {
           if (active) { setStatusMsg(`Playback: ${err}`); setPlaying(false); }
           return;
         }
-        // ~8 fps target; actual rate limited by render time
-        await new Promise<void>((res) => setTimeout(res, 125));
       }
     })();
 
-    return () => { active = false; };
+    return () => { active = false; setFps(null); };
   }, [playing, activeScene]); // currentFrame intentionally omitted — captured at loop start
 
   const handleOpenFile = useCallback(async () => {
@@ -68,7 +93,7 @@ export function Studio() {
     setPlaying(false);
     setCurrentFrame(0);
     setStatusMsg("Opening…");
-    setFrameDataUrl(null);
+    setFrameSrc(null);
     setFrameError(null);
 
     try {
@@ -88,59 +113,44 @@ export function Studio() {
       }
 
       setFrameLoading(true);
-      try {
-        const url = await renderSceneFrame(0, 0, 640, 480);
-        setFrameDataUrl(url);
-        setFrameError(null);
-      } catch (err) {
-        setFrameError(String(err));
-      } finally {
-        setFrameLoading(false);
-      }
+      setFrameSrc(streamUrl(0, 0)); // onLoad/onError handlers clear frameLoading
     } catch (err) {
       setStatusMsg(`Error: ${err}`);
     }
   }, []);
 
-  const handleSelectScene = useCallback(async (idx: number) => {
+  const handleSelectScene = useCallback((idx: number) => {
     setPlaying(false);
     setActiveScene(idx);
     setCurrentFrame(0);
     setFrameLoading(true);
     setFrameError(null);
-    try {
-      const url = await renderSceneFrame(idx, 0, 640, 480);
-      setFrameDataUrl(url);
-      setFrameError(null);
-    } catch (err) {
-      setFrameDataUrl(null);
-      setFrameError(String(err));
-      setStatusMsg(`Scene ${idx + 1}: ${err}`);
-    } finally {
-      setFrameLoading(false);
-    }
+    setFrameSrc(streamUrl(idx, 0));
   }, []);
 
   const handlePlayPause = useCallback(() => {
     setPlaying((p) => !p);
   }, []);
 
-  const handleStepFrame = useCallback(async (delta: number) => {
+  const handleFrameLoad = useCallback(() => {
+    setFrameLoading(false);
+    setFrameError(null);
+  }, []);
+
+  const handleFrameError = useCallback(() => {
+    setFrameLoading(false);
+    setFrameError("Render failed");
+  }, []);
+
+  const handleStepFrame = useCallback((delta: number) => {
     if (playing) return;
     const scene = scenes[activeScene];
     if (!scene) return;
     const next = Math.max(0, Math.min(currentFrame + delta, scene.frame_count - 1));
     setCurrentFrame(next);
     setFrameLoading(true);
-    try {
-      const url = await renderSceneFrame(activeScene, next, 640, 480);
-      setFrameDataUrl(url);
-      setFrameError(null);
-    } catch (err) {
-      setStatusMsg(`Frame ${next}: ${err}`);
-    } finally {
-      setFrameLoading(false);
-    }
+    setFrameError(null);
+    setFrameSrc(streamUrl(activeScene, next));
   }, [playing, activeScene, scenes, currentFrame]);
 
   const handlePlaySound = useCallback(async (cno: number) => {
@@ -173,10 +183,24 @@ export function Studio() {
         {/* Viewport */}
         <div className="viewport-panel">
           <Viewport
-            frameDataUrl={frameDataUrl}
+            ref={imgRef}
+            frameSrc={frameSrc}
             loading={frameLoading}
             error={frameError}
+            onLoad={handleFrameLoad}
+            onError={handleFrameError}
           />
+          {/* FPS overlay — visible during playback only */}
+          {fps !== null && (
+            <div style={{
+              position: 'absolute', top: 8, right: 8,
+              background: 'rgba(0,0,0,0.65)', color: '#00ff88',
+              padding: '2px 8px', fontFamily: 'monospace', fontSize: 13,
+              borderRadius: 4, pointerEvents: 'none', userSelect: 'none',
+            }}>
+              {fps} fps
+            </div>
+          )}
           {/* Playback controls overlay */}
           {movie && (
             <div className="playback-bar">

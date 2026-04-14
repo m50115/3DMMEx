@@ -1,27 +1,37 @@
+import { forwardRef } from "react";
+
 interface ViewportProps {
-  frameDataUrl: string | null;
+  frameSrc: string | null;
   loading: boolean;
   error: string | null;
+  onLoad?: () => void;
+  onError?: () => void;
 }
 
-export function Viewport({ frameDataUrl, loading, error }: ViewportProps) {
-  return (
-    <div className="viewport">
-      {loading && <div className="viewport-overlay">Rendering…</div>}
-      {error && <div className="viewport-overlay error">{error}</div>}
-      {frameDataUrl && !loading && (
-        <img
-          className="viewport-frame"
-          src={frameDataUrl}
-          alt="3D frame"
-          draggable={false}
-        />
-      )}
-      {!frameDataUrl && !loading && !error && (
-        <div className="viewport-overlay hint">
-          Open a .3mm file to begin
-        </div>
-      )}
-    </div>
-  );
-}
+export const Viewport = forwardRef<HTMLImageElement, ViewportProps>(
+  function Viewport({ frameSrc, loading, error, onLoad, onError }, imgRef) {
+    return (
+      <div className="viewport">
+        {loading && <div className="viewport-overlay">Rendering…</div>}
+        {error && <div className="viewport-overlay error">{error}</div>}
+        {frameSrc && (
+          <img
+            ref={imgRef}
+            className="viewport-frame"
+            src={frameSrc}
+            alt="3D frame"
+            draggable={false}
+            onLoad={onLoad}
+            onError={onError}
+            style={{ display: loading ? 'none' : undefined }}
+          />
+        )}
+        {!frameSrc && !loading && !error && (
+          <div className="viewport-overlay hint">
+            Open a .3mm file to begin
+          </div>
+        )}
+      </div>
+    );
+  }
+);
