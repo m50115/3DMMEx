@@ -76,6 +76,11 @@ pub fn open_file(path: String, state: State<AppState>) -> Result<MovieInfo, Stri
                     *state.tmpls.lock().unwrap() = Some(Arc::new(cf));
                 }
             }
+            // Invalidate GPU mesh cache — new file means new geometry.
+            let mut gpu_guard = state.gpu.lock().unwrap();
+            if let Some(ref mut gpu) = *gpu_guard {
+                gpu.clear_mesh_cache();
+            }
         }
     }
 
@@ -305,18 +310,20 @@ pub fn render_scene_frame(
         return Err(format!("No actors with valid templates"));
     }
 
-    // --- Step 2: look up cached tmpls.3cn (parsed once at file open) --------
+    // --- Step 2: look up cached tmpls.3cn + GPU renderer ---------------------
     let tmpls = state.tmpls.lock().unwrap().clone()
         .ok_or_else(|| "tmpls.3cn not loaded".to_string())?;
 
-    // Collect all renderable models for the scene (one per actor with a valid TMPL).
-    let mut models: Vec<(Model, glam::Mat4)> = Vec::new();
+    let mut gpu_guard = state.gpu.lock().unwrap();
+    let gpu = gpu_guard.as_mut()
+        .ok_or_else(|| "No GPU adapter available".to_string())?;
+
+    // For each actor: ensure its BMDL mesh is uploaded (no-op if cached).
+    // Build scene_entries: ((CTG_BMDL, bmdl_cno), world_transform).
+    let mut scene_entries: Vec<((u32, u32), glam::Mat4)> = Vec::new();
     let mut diag: Vec<String> = Vec::new();
 
     for &(ctg, cno, transform) in &tag_tmpls {
-        let ctg_str: String = ctg.to_be_bytes().iter()
-            .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
-            .collect();
         if ctg == CTG_TMPL {
             let tmpl_opt = tmpls.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == cno);
             let tmpl = match tmpl_opt {
@@ -328,56 +335,61 @@ pub fn render_scene_frame(
                 diag.push(format!("TMPL:{cno} has no BMDL children"));
                 continue;
             }
-            // Take first BMDL child with valid geometry.
-            let mut found = false;
+            let mut found_key: Option<(u32, u32)> = None;
             for ch in &bmdl_children {
-                match tmpls.get_chunk_data(ch.id.ctg, ch.id.cno) {
-                    Err(e) => { diag.push(format!("BMDL:{} err: {e:?}", ch.id.cno)); }
-                    Ok(data) => {
-                        if data.len() < 80 { continue; }
+                let bmdl_key = (CTG_BMDL, ch.id.cno);
+                if gpu.has_mesh(bmdl_key) {
+                    found_key = Some(bmdl_key);
+                    break;
+                }
+                // Not cached yet — parse and upload once.
+                if let Ok(data) = tmpls.get_chunk_data(ch.id.ctg, ch.id.cno) {
+                    if data.len() >= 80 {
                         if let Ok(m) = Model::from_bytes(&data) {
-                            if m.has_valid_faces() && !m.vertices.is_empty() {
-                                models.push((m, transform));
-                                found = true;
+                            gpu.ensure_mesh(bmdl_key, &m);
+                            if gpu.has_mesh(bmdl_key) {
+                                found_key = Some(bmdl_key);
                                 break;
                             }
                         }
                     }
                 }
             }
-            if !found {
-                diag.push(format!("TMPL:{cno} — no renderable BMDL child"));
+            match found_key {
+                Some(k) => scene_entries.push((k, transform)),
+                None => diag.push(format!("TMPL:{cno} — no renderable BMDL child")),
             }
         } else if ctg == CTG_BMDL {
-            match tmpls.get_chunk_data(CTG_BMDL, cno) {
-                Err(e) => { diag.push(format!("direct BMDL:{cno} err: {e:?}")); }
-                Ok(data) => {
+            let bmdl_key = (CTG_BMDL, cno);
+            if !gpu.has_mesh(bmdl_key) {
+                if let Ok(data) = tmpls.get_chunk_data(CTG_BMDL, cno) {
                     if data.len() >= 80 {
                         if let Ok(m) = Model::from_bytes(&data) {
-                            if m.has_valid_faces() && !m.vertices.is_empty() {
-                                models.push((m, transform));
-                            }
+                            gpu.ensure_mesh(bmdl_key, &m);
                         }
                     }
                 }
             }
+            if gpu.has_mesh(bmdl_key) {
+                scene_entries.push((bmdl_key, transform));
+            } else {
+                diag.push(format!("direct BMDL:{cno} not renderable"));
+            }
         } else {
+            let ctg_str: String = ctg.to_be_bytes().iter()
+                .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
+                .collect();
             diag.push(format!("actor ctg='{}' cno={cno} — not TMPL/BMDL", ctg_str));
         }
     }
 
-    if models.is_empty() {
+    if scene_entries.is_empty() {
         return Err(format!("No renderable model: {}",
             if diag.is_empty() { "no actors matched".into() } else { diag.join("; ") }));
     }
 
-    // --- Step 3: GPU render all models → PNG data URL ---------------------
-    let gpu_guard = state.gpu.lock().unwrap();
-    let gpu = gpu_guard.as_ref()
-        .ok_or_else(|| "No GPU adapter available".to_string())?;
-
-    let model_refs: Vec<(&Model, glam::Mat4)> = models.iter().map(|(m, t)| (m, *t)).collect();
-    let rgba = gpu.render_models(&model_refs, width, height);
+    // --- Step 3: GPU render using cached mesh buffers → PNG data URL --------
+    let rgba = gpu.render_scene(&scene_entries, width, height);
     if rgba.is_empty() {
         return Err("Render produced empty output".into());
     }

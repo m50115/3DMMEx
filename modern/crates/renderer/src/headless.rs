@@ -6,6 +6,8 @@
 //!
 //! Returns `None` / gracefully skips when no GPU adapter is available (CI, no GPU).
 
+use std::collections::HashMap;
+
 use engine::model::Model;
 use glam::Mat4;
 use wgpu::util::DeviceExt;
@@ -16,6 +18,16 @@ use crate::lighting::GpuLight;
 use crate::material::{GpuMaterial, GpuTexture};
 use crate::pipeline::{GpuModelUniform, RenderPipeline};
 
+/// Per-model GPU resources cached by `(ctg, cno)` key.
+struct CachedMesh {
+    vertex_buf: wgpu::Buffer,
+    index_buf: wgpu::Buffer,
+    index_count: u32,
+    /// Local-space AABB — used to compute world-space bbox without re-iterating vertices.
+    local_min: [f32; 3],
+    local_max: [f32; 3],
+}
+
 /// Headless GPU context for offscreen rendering.
 pub struct HeadlessRenderer {
     device: wgpu::Device,
@@ -24,6 +36,9 @@ pub struct HeadlessRenderer {
     pipeline: RenderPipeline,
     /// 1×1 white fallback texture — created once, shared across draw calls.
     fallback_texture: GpuTexture,
+    /// Vertex/index buffers keyed by `(ctg, cno)` of the source BMDL chunk.
+    /// Populated lazily on first scene render; invalidated on file change.
+    mesh_cache: HashMap<(u32, u32), CachedMesh>,
 }
 
 impl HeadlessRenderer {
@@ -55,7 +70,7 @@ impl HeadlessRenderer {
         // default viewport size — RenderPipeline::resize() can update if needed.
         let pipeline = RenderPipeline::new(&device, Self::DEFAULT_FORMAT, 640, 480);
         let fallback_texture = Self::white_texture_1x1(&device, &queue);
-        Some(Self { device, queue, pipeline, fallback_texture })
+        Some(Self { device, queue, pipeline, fallback_texture, mesh_cache: HashMap::new() })
     }
 
     /// Render a single `model` to an offscreen `width × height` texture.
@@ -270,6 +285,230 @@ impl HeadlessRenderer {
             let row_start = (row * bytes_per_row) as usize;
             let row_end = row_start + (width * 4) as usize;
             rgba.extend_from_slice(&mapped[row_start..row_end]);
+        }
+        rgba
+    }
+
+    // ── Mesh cache API ────────────────────────────────────────────────────────
+
+    /// Return true if the GPU buffers for `key` are already uploaded.
+    pub fn has_mesh(&self, key: (u32, u32)) -> bool {
+        self.mesh_cache.contains_key(&key)
+    }
+
+    /// Upload vertex/index buffers for `model` under `key` if not already cached.
+    /// No-op if `key` is already present or model has no renderable geometry.
+    pub fn ensure_mesh(&mut self, key: (u32, u32), model: &Model) {
+        if self.mesh_cache.contains_key(&key) { return; }
+        if !model.has_valid_faces() || model.vertices.is_empty() { return; }
+        let mesh = model_to_mesh(model);
+        if mesh.vertices.is_empty() { return; }
+
+        let mut min_x = f32::MAX; let mut min_y = f32::MAX; let mut min_z = f32::MAX;
+        let mut max_x = f32::MIN; let mut max_y = f32::MIN; let mut max_z = f32::MIN;
+        for v in &mesh.vertices {
+            min_x = min_x.min(v.position[0]); max_x = max_x.max(v.position[0]);
+            min_y = min_y.min(v.position[1]); max_y = max_y.max(v.position[1]);
+            min_z = min_z.min(v.position[2]); max_z = max_z.max(v.position[2]);
+        }
+
+        let vertex_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vbuf_cached"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ibuf_cached"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        self.mesh_cache.insert(key, CachedMesh {
+            vertex_buf,
+            index_buf,
+            index_count: mesh.index_count(),
+            local_min: [min_x, min_y, min_z],
+            local_max: [max_x, max_y, max_z],
+        });
+    }
+
+    /// Drop all cached GPU buffers. Call when a new file is opened.
+    pub fn clear_mesh_cache(&mut self) {
+        self.mesh_cache.clear();
+    }
+
+    /// Render a scene frame using cached GPU buffers.
+    ///
+    /// Each entry is `((ctg, cno), world_transform)`. Entries whose key is not
+    /// in the cache are silently skipped — call [`ensure_mesh`] first.
+    /// Returns raw RGBA8 pixels or an empty Vec if nothing is renderable.
+    pub fn render_scene(&self, models: &[((u32, u32), Mat4)], width: u32, height: u32) -> Vec<u8> {
+        // Collect only cached entries.
+        let entries: Vec<(&CachedMesh, Mat4)> = models.iter()
+            .filter_map(|(key, t)| self.mesh_cache.get(key).map(|m| (m, *t)))
+            .collect();
+        if entries.is_empty() { return Vec::new(); }
+
+        let device = &self.device;
+        let queue = &self.queue;
+        let rp = &self.pipeline;
+        let render_format = Self::DEFAULT_FORMAT;
+        let fallback = &self.fallback_texture;
+
+        // ── world-space bbox from local AABB × 8 corners ─────────────────────
+        let (mut min_x, mut min_y, mut min_z) = (f32::MAX, f32::MAX, f32::MAX);
+        let (mut max_x, mut max_y, mut max_z) = (f32::MIN, f32::MIN, f32::MIN);
+        for (mesh, transform) in &entries {
+            let [lx0, ly0, lz0] = mesh.local_min;
+            let [lx1, ly1, lz1] = mesh.local_max;
+            for &cx in &[lx0, lx1] {
+                for &cy in &[ly0, ly1] {
+                    for &cz in &[lz0, lz1] {
+                        let wp = transform.transform_point3(glam::Vec3::new(cx, cy, cz));
+                        min_x = min_x.min(wp.x); max_x = max_x.max(wp.x);
+                        min_y = min_y.min(wp.y); max_y = max_y.max(wp.y);
+                        min_z = min_z.min(wp.z); max_z = max_z.max(wp.z);
+                    }
+                }
+            }
+        }
+        let cx = (min_x + max_x) * 0.5;
+        let cy = (min_y + max_y) * 0.5;
+        let cz = (min_z + max_z) * 0.5;
+        let half_diag = ((max_x - min_x).powi(2)
+            + (max_y - min_y).powi(2)
+            + (max_z - min_z).powi(2))
+            .sqrt() * 0.5;
+        let fit_radius = half_diag.max(0.001);
+
+        let mut camera = Camera::new();
+        camera.aspect = width as f32 / height as f32;
+        camera.target = glam::Vec3::new(cx, cy, cz);
+        camera.position = glam::Vec3::new(cx, cy, max_z + fit_radius * 2.0);
+        camera.near = fit_radius * 0.01;
+        camera.far = fit_radius * 20.0;
+
+        queue.write_buffer(&rp.camera_buf, 0, bytemuck::bytes_of(&camera.to_gpu()));
+        queue.write_buffer(&rp.light_buf, 0, bytemuck::bytes_of(&GpuLight::default()));
+
+        // ── per-frame draw calls: new model uniform, cached vertex/index bufs ─
+        struct DrawCall<'c> {
+            vertex_buf: &'c wgpu::Buffer,
+            index_buf: &'c wgpu::Buffer,
+            instance_bg: wgpu::BindGroup,
+            index_count: u32,
+        }
+
+        let draw_calls: Vec<DrawCall<'_>> = entries.iter().enumerate().map(|(i, (mesh, transform))| {
+            let model_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("model_uniform_{i}")),
+                contents: bytemuck::bytes_of(&GpuModelUniform::from_transform(transform)),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let material_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("material_uniform_{i}")),
+                contents: bytemuck::bytes_of(&GpuMaterial::default()),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let instance_bg = rp.create_instance_bind_group(
+                device, &model_buf, &material_buf, &fallback.view, &fallback.sampler,
+            );
+            DrawCall { vertex_buf: &mesh.vertex_buf, index_buf: &mesh.index_buf, instance_bg, index_count: mesh.index_count }
+        }).collect();
+
+        // ── offscreen targets ─────────────────────────────────────────────────
+        let color_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("color_target"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: render_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth_target"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // ── render pass ───────────────────────────────────────────────────────
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render_encoder"),
+        });
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("main_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.08, g: 0.08, b: 0.12, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&rp.pipeline);
+            rpass.set_bind_group(0, &rp.frame_bind_group, &[]);
+            for dc in &draw_calls {
+                rpass.set_bind_group(1, &dc.instance_bg, &[]);
+                rpass.set_vertex_buffer(0, dc.vertex_buf.slice(..));
+                rpass.set_index_buffer(dc.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(0..dc.index_count, 0, 0..1);
+            }
+        }
+
+        // ── readback ─────────────────────────────────────────────────────────
+        let bytes_per_row = (width * 4).next_multiple_of(256);
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("staging"),
+            size: (bytes_per_row * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &color_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+        device.poll(wgpu::Maintain::Wait);
+        if rx.recv().unwrap().is_err() { return Vec::new(); }
+        let mapped = staging.slice(..).get_mapped_range();
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for row in 0..height {
+            let row_start = (row * bytes_per_row) as usize;
+            rgba.extend_from_slice(&mapped[row_start..row_start + (width * 4) as usize]);
         }
         rgba
     }
