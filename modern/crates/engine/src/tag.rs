@@ -57,6 +57,11 @@ pub const CTG_GLLT: u32 = u32::from_be_bytes(*b"GLLT");
 pub const CTG_PATH: u32 = u32::from_be_bytes(*b"PATH");
 /// GG of actor events.
 pub const CTG_GGAE: u32 = u32::from_be_bytes(*b"GGAE");
+/// Template data chunk — child of TMPL in .3mm fan movies.
+/// Contains a reference to a BMDL in an external content file (tdfs.3cn).
+pub const CTG_TDT: u32 = u32::from_be_bytes(*b"TDT ");
+/// File tag stored inside TDT chunks — identifies tdfs.3cn as the source.
+pub const CTG_TDFS: u32 = u32::from_be_bytes(*b"TDF ");
 
 // ── Audio chunk types ────────────────────────────────────────────────────────
 
