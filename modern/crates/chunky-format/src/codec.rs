@@ -23,7 +23,7 @@ pub const FMT_KCD2: u32 = 0x4B43_4432;
 /// No compression
 pub const FMT_NIL: u32 = 0;
 
-/// Codec header size: [cfmt u32 BE][cbDecompressed u32 BE]
+/// Codec header size: [cfmt u32 BE][cbDecompressed u32 BE] — same for KCDC and KCD2.
 pub const HEADER_SIZE: usize = 8;
 /// Required tail padding (0xFF bytes) at end of every compressed stream
 const TAIL_SIZE: usize = 6;
@@ -44,8 +44,8 @@ const MAX_LEN_BITS: u32 = 11;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/// Decompress data that has a codec header (8 bytes: format + decompressed size).
-pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
+/// Decompress data that has an 8-byte codec header: [cfmt u32 BE][cbDecompressed u32 BE].
+pub fn decompress(data: &[u8], _cb_hint: usize) -> Result<Vec<u8>> {
     if data.len() < HEADER_SIZE {
         return Err(ChunkyError::UnexpectedEof);
     }
@@ -154,8 +154,11 @@ fn decompress_kcdc(src: &[u8], expected: usize) -> Result<Vec<u8>> {
                 break; // 20-bit terminator
             }
 
-            // Logarithmic length
-            let length = read_length_kcdc(&mut bits);
+            // Logarithmic length.
+            // C++ _FDecode: Tier-3 offsets get cb++ before the length decode
+            // (same bonus as KCD2's tier3_bonus).
+            let tier3_bonus = if offset >= BASE_TIER3 { 1 } else { 0 };
+            let length = read_length_kcdc(&mut bits) + tier3_bonus;
 
             copy_match(&mut out, offset as usize, length as usize)?;
         }
@@ -297,9 +300,13 @@ fn read_offset(bits: &mut BitReader) -> Result<u32> {
 
 /// KCDC length: logarithmic encoding after offset.
 ///
+/// C++ `_FDecode`: `cb` starts at 1, then `cb += (1 << cbit) + data_bits`.
+/// So the encoded value is `1 + (1 << cbit) + data_bits`.
+/// Minimum match length = 2 (cbit=0, data=0 → 1+1+0 = 2).
+///
 /// ```text
 /// cbit leading 1-bits, then a 0-bit, then cbit data bits
-/// length = (1 << cbit) + data_bits
+/// length = 1 + (1 << cbit) + data_bits
 /// ```
 fn read_length_kcdc(bits: &mut BitReader) -> u32 {
     let mut cbit = 0u32;
@@ -309,7 +316,7 @@ fn read_length_kcdc(bits: &mut BitReader) -> u32 {
     }
     bits.skip_bit(); // consume the 0-bit
     let data = bits.read(cbit);
-    (1 << cbit) + data
+    1 + (1 << cbit) + data
 }
 
 /// KCD2 length: same encoding but returns (cbit, value) so caller can detect terminator.
