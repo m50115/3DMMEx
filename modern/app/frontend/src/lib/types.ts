@@ -11,6 +11,11 @@ export interface SceneInfo {
   actor_count: number;
 }
 
+export interface TemplateInfo {
+  cno: number;
+  name: string | null;
+}
+
 export interface SoundEntry {
   cno: number;
   name: string | null;

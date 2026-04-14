@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import { openFile, getSceneList, listSounds, playSound, getSceneActors, updateActorPosition, updateActorFrameRange, updateActorOrientation, saveFile } from "../lib/engine";
-import type { MovieInfo, SceneInfo, SoundEntry, ActorInfo } from "../lib/types";
+import { openFile, getSceneList, listSounds, playSound, getSceneActors, updateActorPosition, updateActorFrameRange, updateActorOrientation, saveFile, listTemplates, addActor, removeActor } from "../lib/engine";
+import type { MovieInfo, SceneInfo, SoundEntry, ActorInfo, TemplateInfo } from "../lib/types";
 import { Timeline } from "./Timeline";
 import { Viewport } from "./Viewport";
 
@@ -37,6 +37,8 @@ export function Studio() {
   // ── Editor state ──────────────────────────────────────────────────────
   const [actors, setActors] = useState<ActorInfo[]>([]);
   const [selectedActorIdx, setSelectedActorIdx] = useState<number | null>(null);
+  const [templates, setTemplates] = useState<TemplateInfo[]>([]);
+  const [selectedTmplCno, setSelectedTmplCno] = useState<number | null>(null);
   const [editDx, setEditDx] = useState("0");
   const [editDy, setEditDy] = useState("0");
   const [editDz, setEditDz] = useState("0");
@@ -122,6 +124,15 @@ export function Studio() {
         setSounds(s);
       } catch {
         setSounds([]);
+      }
+
+      try {
+        const tmplList = await listTemplates();
+        setTemplates(tmplList);
+        setSelectedTmplCno(tmplList.length > 0 ? tmplList[0].cno : null);
+      } catch {
+        setTemplates([]);
+        setSelectedTmplCno(null);
       }
 
       setFrameLoading(true);
@@ -259,6 +270,36 @@ export function Studio() {
     }
   }, []);
 
+  const handleAddActor = useCallback(async () => {
+    if (selectedTmplCno === null) return;
+    try {
+      const newCno = await addActor(activeScene, selectedTmplCno, 0, 0, 0);
+      const updated = await getSceneActors(activeScene);
+      setActors(updated);
+      setFrameLoading(true);
+      setFrameError(null);
+      setFrameSrc(streamUrl(activeScene, currentFrame));
+      setStatusMsg(`Added actor cno=${newCno}.`);
+    } catch (err) {
+      setStatusMsg(`Add actor failed: ${err}`);
+    }
+  }, [activeScene, selectedTmplCno, currentFrame]);
+
+  const handleRemoveActor = useCallback(async (actorIdx: number) => {
+    try {
+      await removeActor(activeScene, actorIdx);
+      const updated = await getSceneActors(activeScene);
+      setActors(updated);
+      if (selectedActorIdx === actorIdx) setSelectedActorIdx(null);
+      setFrameLoading(true);
+      setFrameError(null);
+      setFrameSrc(streamUrl(activeScene, currentFrame));
+      setStatusMsg(`Removed actor ${actorIdx}.`);
+    } catch (err) {
+      setStatusMsg(`Remove actor failed: ${err}`);
+    }
+  }, [activeScene, selectedActorIdx, currentFrame]);
+
   const activeSceneInfo = scenes[activeScene];
 
   return (
@@ -348,6 +389,17 @@ export function Studio() {
                 >
                   <span className="sound-name">Actor {a.actor_idx}</span>
                   <span className="sound-type" title={`cno=${a.cno}`}>cno={a.cno}</span>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleRemoveActor(a.actor_idx); }}
+                    title="Remove actor"
+                    style={{
+                      marginLeft: 'auto', background: '#4a1a1a', border: 'none',
+                      color: 'var(--text)', borderRadius: 3, padding: '2px 6px',
+                      fontSize: 11, cursor: 'pointer',
+                    }}
+                  >
+                    ✕
+                  </button>
                 </li>
               ))}
               {actors.length === 0 && (
@@ -356,6 +408,34 @@ export function Studio() {
                 </li>
               )}
             </ul>
+
+            {/* Template picker — add actor */}
+            {templates.length > 0 && (
+              <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border)', display: 'flex', gap: 6 }}>
+                <select
+                  value={selectedTmplCno ?? ''}
+                  onChange={(e) => setSelectedTmplCno(Number(e.target.value))}
+                  style={{
+                    flex: 1, background: 'var(--bg)', border: '1px solid var(--border)',
+                    color: 'var(--text)', borderRadius: 3, padding: '3px 6px', fontSize: 12,
+                  }}
+                >
+                  {templates.map((t) => (
+                    <option key={t.cno} value={t.cno}>
+                      {t.name ?? `tmpl_${t.cno}`}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="btn-primary"
+                  style={{ fontSize: 11, padding: '3px 8px', whiteSpace: 'nowrap' }}
+                  onClick={handleAddActor}
+                  disabled={selectedTmplCno === null}
+                >
+                  + Add
+                </button>
+              </div>
+            )}
 
             {/* Position editor — shown when an actor is selected */}
             {selectedActorIdx !== null && (

@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use audio::decode_wav;
-use chunky_format::collections::GenericGroup;
-use chunky_format::ChunkyFile;
+use chunky_format::collections::{GenericGroup, GenericList};
+use chunky_format::{ChunkEntry, ChunkFlags, ChunkId, ChildRef, ChunkyFile};
 use engine::actor::ActorOnFile;
 use engine::events::{ActorEvent, EventPayload, OrientPayload, aet};
 use engine::fixedpoint::FixedAngle;
@@ -994,6 +994,189 @@ pub fn save_file(path: Option<String>, state: State<AppState>) -> Result<String,
         .map_err(|e| format!("Write failed: {e}"))?;
 
     Ok(save_path.to_string_lossy().into_owned())
+}
+
+// ── Phase 7c — Add/remove actors ─────────────────────────────────────────
+
+/// Template metadata returned to the frontend template picker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateInfo {
+    /// Chunk number of the TMPL in tmpls.3cn.
+    pub cno: u32,
+    /// Human-readable name from the chunk's name field (often None for content library TMPLs).
+    pub name: Option<String>,
+}
+
+/// List all TMPL chunks in the loaded tmpls.3cn content library.
+#[tauri::command]
+pub fn list_templates(state: State<AppState>) -> Result<Vec<TemplateInfo>, String> {
+    let tmpls = state.tmpls.lock().unwrap().clone()
+        .ok_or_else(|| "tmpls.3cn not loaded".to_string())?;
+    Ok(tmpls.chunks.iter()
+        .filter(|c| c.id.ctg == CTG_TMPL)
+        .map(|c| TemplateInfo { cno: c.id.cno, name: c.name.clone() })
+        .collect())
+}
+
+/// Allocate the next cno for a given chunk type (max existing + 1, floor 1).
+fn next_cno(cfl: &ChunkyFile, ctg: u32) -> u32 {
+    cfl.chunks.iter()
+        .filter(|c| c.id.ctg == ctg)
+        .map(|c| c.id.cno)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(1)
+}
+
+/// Add a new actor to a scene using a template from tmpls.3cn.
+///
+/// The actor is placed at the given world-space offset (dx/dy/dz).
+/// Returns the new actor's cno so the frontend can select it immediately.
+#[tauri::command]
+pub fn add_actor(
+    scene_idx: usize,
+    tmpl_cno: u32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    state: State<AppState>,
+) -> Result<u32, String> {
+    let mut guard = state.loaded_file.lock().unwrap();
+    let lf = guard.as_mut().ok_or("No file loaded")?;
+
+    // Allocate cnos for the three new chunks
+    let actr_cno = next_cno(&lf.cfl, CTG_ACTR);
+    let path_cno = next_cno(&lf.cfl, CTG_PATH);
+    let ggae_cno = next_cno(&lf.cfl, CTG_GGAE);
+
+    // Build ACTR body (44 bytes ACTF)
+    // Layout: [bo:2][osk:2][dxyz:12][arid:4][nfrm_first:4][nfrm_last:4][tag_tmpl:16]
+    let mut actr_bytes = [0u8; 44];
+    actr_bytes[0..2].copy_from_slice(&1i16.to_le_bytes()); // bo = LE
+    let x_brs = (dx * 65536.0) as i32;
+    let y_brs = (dy * 65536.0) as i32;
+    let z_brs = (dz * 65536.0) as i32;
+    actr_bytes[4..8].copy_from_slice(&x_brs.to_le_bytes());
+    actr_bytes[8..12].copy_from_slice(&y_brs.to_le_bytes());
+    actr_bytes[12..16].copy_from_slice(&z_brs.to_le_bytes());
+    // arid = 0 at [16..20] (already zero)
+    actr_bytes[20..24].copy_from_slice(&1i32.to_le_bytes()); // nfrm_first = 1
+    actr_bytes[24..28].copy_from_slice(&1i32.to_le_bytes()); // nfrm_last  = 1
+    // tag_tmpl: [sid:4][_pcrf:4][ctg:4][cno:4] at [28..44]
+    // sid and _pcrf stay zero
+    actr_bytes[36..40].copy_from_slice(&CTG_TMPL.to_le_bytes());
+    actr_bytes[40..44].copy_from_slice(&tmpl_cno.to_le_bytes());
+
+    // Build empty PATH (GL: [entry_size=16][count=0][bo=1][osk=0] = 12 bytes)
+    let path_bytes = GenericList { entry_size: 16, bo: 1, osk: 0, entries: vec![] }.write();
+
+    // Build empty GGAE (GG: [fixed_size=20][count=0][bo=1][osk=0] = 12 bytes)
+    let ggae_bytes = GenericGroup {
+        fixed_size: 20, bo: 1, osk: 0,
+        fixed_entries: vec![], variable_entries: vec![],
+    }.write();
+
+    // Insert PATH
+    lf.cfl.chunks.push(ChunkEntry {
+        id: ChunkId { ctg: CTG_PATH, cno: path_cno },
+        fp: 0, cb: path_bytes.len() as u32,
+        flags: ChunkFlags::NONE, child_count: 0, ref_count: 0, rti: 0,
+        children: vec![], name: None,
+    });
+    lf.cfl.chunk_data.insert((CTG_PATH, path_cno), path_bytes);
+
+    // Insert GGAE
+    lf.cfl.chunks.push(ChunkEntry {
+        id: ChunkId { ctg: CTG_GGAE, cno: ggae_cno },
+        fp: 0, cb: ggae_bytes.len() as u32,
+        flags: ChunkFlags::NONE, child_count: 0, ref_count: 0, rti: 0,
+        children: vec![], name: None,
+    });
+    lf.cfl.chunk_data.insert((CTG_GGAE, ggae_cno), ggae_bytes);
+
+    // Insert ACTR with PATH + GGAE as children
+    lf.cfl.chunks.push(ChunkEntry {
+        id: ChunkId { ctg: CTG_ACTR, cno: actr_cno },
+        fp: 0, cb: 44,
+        flags: ChunkFlags::NONE, child_count: 2, ref_count: 0, rti: 0,
+        children: vec![
+            ChildRef { id: ChunkId { ctg: CTG_PATH, cno: path_cno }, chid: 0 },
+            ChildRef { id: ChunkId { ctg: CTG_GGAE, cno: ggae_cno }, chid: 0 },
+        ],
+        name: None,
+    });
+    lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), actr_bytes.to_vec());
+
+    // Register ACTR as a child of the target SCEN
+    let scen = lf.cfl.chunks.iter_mut()
+        .filter(|c| c.id.ctg == CTG_SCEN)
+        .nth(scene_idx)
+        .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
+    scen.children.push(ChildRef {
+        id: ChunkId { ctg: CTG_ACTR, cno: actr_cno },
+        chid: 0,
+    });
+    scen.child_count = scen.children.len() as u32;
+
+    Ok(actr_cno)
+}
+
+/// Remove an actor (and its PATH / GGAE sub-chunks) from a scene.
+#[tauri::command]
+pub fn remove_actor(
+    scene_idx: usize,
+    actor_idx: usize,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let mut guard = state.loaded_file.lock().unwrap();
+    let lf = guard.as_mut().ok_or("No file loaded")?;
+
+    // Resolve actor_idx → ACTR cno
+    let actr_cno = {
+        let scen = lf.cfl.chunks.iter()
+            .filter(|c| c.id.ctg == CTG_SCEN)
+            .nth(scene_idx)
+            .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
+        scen.children.iter()
+            .filter(|c| c.id.ctg == CTG_ACTR)
+            .nth(actor_idx)
+            .ok_or_else(|| format!("Actor {actor_idx} not found in scene {scene_idx}"))?
+            .id.cno
+    };
+
+    // Collect PATH/GGAE cnos from ACTR's children before we remove the ACTR entry
+    let (path_cno, ggae_cno) = {
+        let entry = lf.cfl.chunks.iter()
+            .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == actr_cno);
+        let path = entry.and_then(|e| e.children.iter().find(|ch| ch.id.ctg == CTG_PATH)).map(|ch| ch.id.cno);
+        let ggae = entry.and_then(|e| e.children.iter().find(|ch| ch.id.ctg == CTG_GGAE)).map(|ch| ch.id.cno);
+        (path, ggae)
+    };
+
+    // Remove ACTR from SCEN child list
+    {
+        let scen = lf.cfl.chunks.iter_mut()
+            .filter(|c| c.id.ctg == CTG_SCEN)
+            .nth(scene_idx)
+            .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
+        scen.children.retain(|c| !(c.id.ctg == CTG_ACTR && c.id.cno == actr_cno));
+        scen.child_count = scen.children.len() as u32;
+    }
+
+    // Remove chunk entries and raw data for ACTR, PATH, GGAE
+    lf.cfl.chunks.retain(|c| !(c.id.ctg == CTG_ACTR && c.id.cno == actr_cno));
+    lf.cfl.chunk_data.remove(&(CTG_ACTR, actr_cno));
+
+    if let Some(cno) = path_cno {
+        lf.cfl.chunks.retain(|c| !(c.id.ctg == CTG_PATH && c.id.cno == cno));
+        lf.cfl.chunk_data.remove(&(CTG_PATH, cno));
+    }
+    if let Some(cno) = ggae_cno {
+        lf.cfl.chunks.retain(|c| !(c.id.ctg == CTG_GGAE && c.id.cno == cno));
+        lf.cfl.chunk_data.remove(&(CTG_GGAE, cno));
+    }
+
+    Ok(())
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

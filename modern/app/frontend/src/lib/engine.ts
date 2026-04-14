@@ -1,7 +1,7 @@
 //! Typed wrappers around Tauri `invoke` calls to the Rust backend.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { MovieInfo, SceneInfo, SoundEntry, ActorInfo } from "./types";
+import type { MovieInfo, SceneInfo, SoundEntry, ActorInfo, TemplateInfo } from "./types";
 
 export async function openFile(path: string): Promise<MovieInfo> {
   return invoke<MovieInfo>("open_file", { path });
@@ -74,4 +74,33 @@ export async function updateActorOrientation(
 /** Save to original path (no arg) or a new path. Returns the saved path. */
 export async function saveFile(path?: string): Promise<string> {
   return invoke<string>("save_file", { path: path ?? null });
+}
+
+// ── Phase 7c — Add/remove actors ─────────────────────────────────────────
+
+/** List all TMPL chunks available in tmpls.3cn (content library). */
+export async function listTemplates(): Promise<TemplateInfo[]> {
+  return invoke<TemplateInfo[]>("list_templates");
+}
+
+/**
+ * Add a new actor to a scene.
+ * @param sceneIdx  Scene index (0-based)
+ * @param tmplCno   TMPL chunk number from tmpls.3cn
+ * @param dx/dy/dz  World-space offset
+ * @returns cno of the newly created ACTR chunk
+ */
+export async function addActor(
+  sceneIdx: number,
+  tmplCno: number,
+  dx: number,
+  dy: number,
+  dz: number,
+): Promise<number> {
+  return invoke<number>("add_actor", { sceneIdx, tmplCno, dx, dy, dz });
+}
+
+/** Remove an actor from a scene by its scene-local index. */
+export async function removeActor(sceneIdx: number, actorIdx: number): Promise<void> {
+  return invoke<void>("remove_actor", { sceneIdx, actorIdx });
 }

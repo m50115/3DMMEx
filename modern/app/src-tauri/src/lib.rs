@@ -23,6 +23,9 @@ pub fn run() {
             commands::update_actor_frame_range,
             commands::update_actor_orientation,
             commands::save_file,
+            commands::list_templates,
+            commands::add_actor,
+            commands::remove_actor,
         ])
         .run(tauri::generate_context!())
         .expect("error running 3DMMEx application");
