@@ -20,9 +20,15 @@ use crate::pipeline::{GpuModelUniform, RenderPipeline};
 pub struct HeadlessRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Render pipeline — created once, reused across all render calls.
+    pipeline: RenderPipeline,
+    /// 1×1 white fallback texture — created once, shared across draw calls.
+    fallback_texture: GpuTexture,
 }
 
 impl HeadlessRenderer {
+    const DEFAULT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
     /// Try to acquire a GPU adapter and create the headless renderer.
     /// Returns `None` if no adapter is available (no GPU, CI environment, etc.).
     pub fn try_new() -> Option<Self> {
@@ -45,7 +51,11 @@ impl HeadlessRenderer {
             None,
         ))
         .ok()?;
-        Some(Self { device, queue })
+        // Pipeline is size-independent (depth texture created per call); 640×480 is the
+        // default viewport size — RenderPipeline::resize() can update if needed.
+        let pipeline = RenderPipeline::new(&device, Self::DEFAULT_FORMAT, 640, 480);
+        let fallback_texture = Self::white_texture_1x1(&device, &queue);
+        Some(Self { device, queue, pipeline, fallback_texture })
     }
 
     /// Render a single `model` to an offscreen `width × height` texture.
@@ -74,10 +84,10 @@ impl HeadlessRenderer {
 
         let device = &self.device;
         let queue = &self.queue;
-        let render_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let render_format = Self::DEFAULT_FORMAT;
 
-        // ── pipeline ──────────────────────────────────────────────────────────
-        let rp = RenderPipeline::new(device, render_format, width, height);
+        // ── pipeline (cached, reused every call) ──────────────────────────────
+        let rp = &self.pipeline;
 
         // ── meshes + combined world-space bounding box ────────────────────────
         let mesh_transforms: Vec<_> = renderable.iter()
@@ -114,7 +124,7 @@ impl HeadlessRenderer {
         queue.write_buffer(&rp.camera_buf, 0, bytemuck::bytes_of(&camera.to_gpu()));
         queue.write_buffer(&rp.light_buf, 0, bytemuck::bytes_of(&GpuLight::default()));
 
-        let fallback = Self::white_texture_1x1(device, queue);
+        let fallback = &self.fallback_texture;
 
         // ── per-model GPU buffers + bind groups ───────────────────────────────
         struct DrawCall {
