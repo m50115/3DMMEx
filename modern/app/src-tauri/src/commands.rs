@@ -21,7 +21,7 @@ use engine::model::Model;
 use engine::msnd::MovieSound;
 use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MSND, CTG_PATH, CTG_SCEN, CTG_TDF, CTG_TDT, CTG_TMPL, CTG_WAVE};
 use engine::tdf::BrTdf;
-use engine::tdt::BrTdt;
+use engine::tdt::{BrTdt, Tdts};
 use engine::transform::RoutePoint;
 use renderer::convert::orient_to_rotation_mat4;
 
@@ -190,6 +190,111 @@ pub fn render_demo_frame(
     Ok(format!("data:image/png;base64,{b64}"))
 }
 
+/// Compute per-character local transforms for a TDT text string (all shape variants).
+///
+/// Returns one `Mat4` per printable byte (≥ 0x20) in `stn`.
+/// Each entry is the character's local transform; combine as `actor_transform * char_transform`.
+///
+/// `dxr` / `dyr` are indexed by ASCII byte value. Elements outside `dxr.len()` fall back to
+/// `dxr[0]`. `dyr_max` is the maximum character height from the TDF header.
+fn compose_layout(stn: &str, tdts: Tdts, dxr: &[f32], dyr: &[f32], dyr_max: f32) -> Vec<glam::Mat4> {
+    use std::f32::consts::PI;
+
+    let chars: Vec<u8> = stn.bytes().filter(|&b| b >= 0x20).collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
+    let fallback_dx = dxr.first().copied().unwrap_or(1.0);
+    let fallback_dy = dyr.first().copied().unwrap_or(0.0);
+
+    let get_dx = |ch: u8| -> f32 {
+        let i = ch as usize;
+        if i < dxr.len() { dxr[i] } else { fallback_dx }
+    };
+    let get_dy = |ch: u8| -> f32 {
+        let i = ch as usize;
+        if i < dyr.len() { dyr[i] } else { fallback_dy }
+    };
+
+    let total_width: f32 = chars.iter().map(|&c| get_dx(c)).sum();
+    let total_height: f32 = chars.iter().map(|&c| get_dy(c)).sum();
+    let radius = if total_width > 0.0 { total_width / (2.0 * PI) } else { 1.0 };
+
+    let mut result = Vec::with_capacity(chars.len());
+    let mut cursor_x = 0.0f32;
+    let mut cursor_y = 0.0f32;
+
+    for &ch in &chars {
+        let dx = get_dx(ch);
+        // Character center x, relative to string center
+        let xr = cursor_x + dx * 0.5 - total_width * 0.5;
+        // Fractional position 0..1 along string width
+        let xr_fract = if total_width > 0.0 { (cursor_x + dx * 0.5) / total_width } else { 0.5 };
+        let quarter = total_width * 0.25;
+
+        let mat = match tdts {
+            Tdts::Normal => {
+                glam::Mat4::from_translation(glam::vec3(xr, 0.0, 0.0))
+            }
+            Tdts::ArchPositive => {
+                let y = quarter * (PI * xr_fract).sin();
+                glam::Mat4::from_translation(glam::vec3(xr, y, 0.0))
+            }
+            Tdts::ArchNegative => {
+                let y = quarter * (1.0 - (PI * xr_fract).sin());
+                glam::Mat4::from_translation(glam::vec3(xr, y, 0.0))
+            }
+            Tdts::ArchZ => {
+                let z = quarter * (PI * xr_fract).sin();
+                glam::Mat4::from_translation(glam::vec3(xr, 0.0, z))
+            }
+            Tdts::CircleY => {
+                let angle = 2.0 * PI * xr_fract;
+                // Rotate Y then translate Z: each char sits at (0,0,r) rotated around Y
+                glam::Mat4::from_rotation_y(angle)
+                    * glam::Mat4::from_translation(glam::vec3(0.0, 0.0, radius))
+            }
+            Tdts::CircleZ => {
+                let angle = 2.0 * PI * xr_fract;
+                // Translate Y by (r + dyrMax) after rotating Z: chars form a ring in XY plane
+                let extra_y = radius + dyr_max;
+                glam::Mat4::from_translation(glam::vec3(0.0, extra_y, 0.0))
+                    * glam::Mat4::from_rotation_z(-angle)
+                    * glam::Mat4::from_translation(glam::vec3(0.0, radius, 0.0))
+            }
+            Tdts::LargeMiddle => {
+                // Scale Y by (1 + sin(π*fract)): tallest in the middle
+                let sy = 1.0 + (PI * xr_fract).sin();
+                // In column-vector terms: S * T (scale around origin, then translate)
+                glam::Mat4::from_scale(glam::vec3(1.0, sy, 1.0))
+                    * glam::Mat4::from_translation(glam::vec3(xr, 0.0, 0.0))
+            }
+            Tdts::Vertical => {
+                // x=0; y = dyrTotal - yrChar (chars stack top→bottom)
+                let y = total_height - cursor_y;
+                glam::Mat4::from_translation(glam::vec3(0.0, y, 0.0))
+            }
+            Tdts::GrowRight => {
+                let sy = 1.0 + xr_fract;
+                glam::Mat4::from_scale(glam::vec3(1.0, sy, 1.0))
+                    * glam::Mat4::from_translation(glam::vec3(xr, 0.0, 0.0))
+            }
+            Tdts::GrowLeft => {
+                let sy = 1.0 + (1.0 - xr_fract);
+                glam::Mat4::from_scale(glam::vec3(1.0, sy, 1.0))
+                    * glam::Mat4::from_translation(glam::vec3(xr, 0.0, 0.0))
+            }
+        };
+
+        result.push(mat);
+        cursor_x += dx;
+        cursor_y += get_dy(ch);
+    }
+
+    result
+}
+
 /// Core render path: collect actors for a scene/frame, upload meshes, GPU render.
 /// Returns raw RGBA8 pixels (width × height × 4 bytes).
 /// Used by both the IPC command (for compat) and the `stream://` URI handler (hot path).
@@ -202,9 +307,9 @@ pub(crate) fn render_to_rgba(
 ) -> Result<Vec<u8>, String> {
     // --- Step 1: locate SCEN chunk and extract actor tag_tmpls + transforms --
     // Each entry: (ctg, cno, transform, tdt_data)
-    // tdt_data = Some((tdf_cno, stn)) for TDT actors; None for normal actors.
+    // tdt_data = Some((tdf_cno, tdts, stn)) for TDT actors; None for normal actors.
     // Extracted while holding the loaded_file lock so Step 2 needs no re-lock.
-    let tag_tmpls: Vec<(u32, u32, glam::Mat4, Option<(u32, String)>)> = {
+    let tag_tmpls: Vec<(u32, u32, glam::Mat4, Option<(u32, Tdts, String)>)> = {
         let guard = state.loaded_file.lock().unwrap();
         let lf = guard.as_ref().ok_or("No file loaded")?;
 
@@ -297,9 +402,9 @@ pub(crate) fn render_to_rgba(
                     glam::Mat4::IDENTITY
                 };
 
-                // For TDT (3D text) actors: extract (tdf_cno, stn) while we hold
+                // For TDT (3D text) actors: extract (tdf_cno, tdts, stn) while we hold
                 // the loaded_file lock so Step 2 can use them without re-locking.
-                let tdt_data: Option<(u32, String)> = if actf.tag_tmpl.ctg == CTG_TMPL {
+                let tdt_data: Option<(u32, Tdts, String)> = if actf.tag_tmpl.ctg == CTG_TMPL {
                     let tmpl_local = lf.cfl.chunks.iter()
                         .find(|c| c.id.ctg == CTG_TMPL && c.id.cno == actf.tag_tmpl.cno);
                     tmpl_local.and_then(|tmpl| {
@@ -308,7 +413,7 @@ pub(crate) fn render_to_rgba(
                         let tdt = BrTdt::from_bytes(&tdt_bytes).ok()?;
                         let stn = tmpl.name.clone().unwrap_or_default();
                         if stn.is_empty() { return None; }
-                        Some((tdt.tag_tdf.cno, stn))
+                        Some((tdt.tag_tdf.cno, tdt.tdts, stn))
                     })
                 } else {
                     None
@@ -339,8 +444,9 @@ pub(crate) fn render_to_rgba(
         let (ctg, cno, transform) = (*ctg, *cno, *transform);
 
         // --- TDT (3D text) path — fan-movie actors with per-char glyph BMDLs ---
-        if let Some((tdf_cno, stn)) = tdt_data {
+        if let Some((tdf_cno, tdts, stn)) = tdt_data {
             let tdf_cno = *tdf_cno;
+            let tdts = *tdts;
             match &tdfs {
                 None => {
                     diag.push(format!("TMPL:{cno} is TDT but tdfs.3cn not loaded"));
@@ -358,7 +464,7 @@ pub(crate) fn render_to_rgba(
                         }
                     };
 
-                    // Parse TDF to get per-char x spacing (dxr[])
+                    // Parse TDF font metrics
                     let tdf = match tdfs_cfl.get_chunk_data(CTG_TDF, tdf_cno)
                         .ok()
                         .and_then(|d| BrTdf::from_bytes(&d).ok())
@@ -370,40 +476,22 @@ pub(crate) fn render_to_rgba(
                         }
                     };
 
-                    // Build cumulative x offsets: x[0]=0, x[i+1]=x[i]+dxr[char_i]
-                    // Characters outside the font's cch range fall back to dxr[0] spacing.
-                    let chars: Vec<u8> = stn.bytes()
-                        .filter(|&b| b >= 0x20) // skip control chars
-                        .collect();
-
-                    if chars.is_empty() {
+                    // Compute per-char transforms for the requested shape variant
+                    let char_transforms = compose_layout(stn, tdts, &tdf.dxr, &tdf.dyr, tdf.dyr_max);
+                    if char_transforms.is_empty() {
                         diag.push(format!("TMPL:{cno} stn has no printable chars"));
                         continue;
                     }
 
-                    // Compute x positions and total width using per-char dxr.
-                    // dxr is indexed by character position in the font (0..cch).
-                    // For chars outside the font range we use a fallback spacing of dxr[0].
-                    let fallback_dx = if tdf.dxr.is_empty() { 1.0f32 } else { tdf.dxr[0] };
-                    let mut x_offsets: Vec<f32> = Vec::with_capacity(chars.len());
-                    let mut cursor = 0.0f32;
-                    for &ch in &chars {
-                        x_offsets.push(cursor);
-                        let idx = ch as usize;
-                        let dx = if idx < tdf.dxr.len() { tdf.dxr[idx] } else { fallback_dx };
-                        cursor += dx;
-                    }
-                    let total_width = cursor;
-
-                    // Render each glyph with a centering x offset
+                    // Render each glyph; chars without a BMDL child are skipped silently
+                    let printable: Vec<u8> = stn.bytes().filter(|&b| b >= 0x20).collect();
                     let mut any_rendered = false;
-                    for (i, &ch) in chars.iter().enumerate() {
-                        // Space (0x20) and chars with no BMDL child: advance x, skip render
+                    for (i, &ch) in printable.iter().enumerate() {
                         let glyph_child = match tdf_chunk.children.iter()
                             .find(|c| c.id.ctg == CTG_BMDL && c.chid == ch as u32)
                         {
                             Some(c) => c,
-                            None => continue, // missing glyph — skip silently
+                            None => continue,
                         };
 
                         let bmdl_key = (CTG_BMDL, glyph_child.id.cno);
@@ -415,9 +503,7 @@ pub(crate) fn render_to_rgba(
                             }
                         }
                         if gpu.has_mesh(bmdl_key) {
-                            let x = x_offsets[i] - total_width * 0.5;
-                            let char_offset = glam::Mat4::from_translation(glam::vec3(x, 0.0, 0.0));
-                            scene_entries.push((bmdl_key, transform * char_offset));
+                            scene_entries.push((bmdl_key, transform * char_transforms[i]));
                             any_rendered = true;
                         }
                     }
