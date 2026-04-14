@@ -17,3 +17,4 @@ pub mod background;
 pub mod actor;
 pub mod scene;
 pub mod movie;
+pub mod msnd;

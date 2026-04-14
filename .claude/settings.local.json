@@ -12,7 +12,9 @@
       "Bash(xxd -l 512 /Users/devuser/www/3DMMEx/../content-files/bkgds.3cn)",
       "Bash(find:*)",
       "Bash(awk -F'[. ]' '{sum+=$5} END {print \"Total tests passed:\", sum}')",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(awk -F'[. ;]' '{sum += $3} END {print \"Total tests:\", sum}')",
+      "Bash(awk '{sum += $1} END {print \"Total:\", sum}')"
     ]
   }
 }

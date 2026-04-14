@@ -32,6 +32,11 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.29"
 
+# Audio
+rodio = { version = "0.20", default-features = false, features = ["wav"] }
+hound = "3"
+midly = { version = "0.5", features = ["std"] }
+
 # Testing
 pretty_assertions = "1"
 tempfile = "3"

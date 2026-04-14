@@ -8,4 +8,10 @@ license.workspace = true
 [dependencies]
 engine = { workspace = true }
 log = { workspace = true }
-# rodio, cpal, fluidlite will be added in Phase 4
+thiserror = { workspace = true }
+midly = { workspace = true }
+rodio = { workspace = true }
+
+[dev-dependencies]
+chunky-format = { path = "../chunky-format" }
+engine = { workspace = true }

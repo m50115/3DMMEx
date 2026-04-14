@@ -58,6 +58,15 @@ pub const CTG_PATH: u32 = u32::from_be_bytes(*b"PATH");
 /// GG of actor events.
 pub const CTG_GGAE: u32 = u32::from_be_bytes(*b"GGAE");
 
+// ── Audio chunk types ────────────────────────────────────────────────────────
+
+/// RIFF WAV audio data chunk (raw RIFF WAVE bytes, 22050 Hz mono 8-bit PCM).
+/// Stored as child of CTG_MSND (chid=0) for SFX and speech sounds.
+pub const CTG_WAVE: u32 = u32::from_be_bytes(*b"WAVE");
+/// MIDI audio data chunk (Standard MIDI File bytes).
+/// Standalone in snds.3cn; referenced by CTG_MSND with sty=Midi.
+pub const CTG_MIDS: u32 = u32::from_be_bytes(*b"MIDS");
+
 // ── Well-known child IDs ────────────────────────────────────────────────────
 
 /// chid for the ACTR chunk inside a SCEN.
