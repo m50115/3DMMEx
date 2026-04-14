@@ -7,7 +7,7 @@
 //! to it via a `std::sync::mpsc::SyncSender`, which IS `Send`.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chunky_format::ChunkyFile;
 use renderer::headless::HeadlessRenderer;
@@ -34,6 +34,8 @@ pub struct AppState {
     pub content_dir: Mutex<Option<PathBuf>>,
     /// Currently opened .3mm file.
     pub loaded_file: Mutex<Option<LoadedFile>>,
+    /// Parsed tmpls.3cn — cached at open_file, reused every render_scene_frame.
+    pub tmpls: Mutex<Option<Arc<ChunkyFile>>>,
     /// Headless GPU renderer (None if no GPU adapter found).
     pub gpu: Mutex<Option<HeadlessRenderer>>,
     /// Channel to the dedicated audio thread (None if audio init failed).
@@ -48,6 +50,7 @@ impl AppState {
         Self {
             content_dir: Mutex::new(None),
             loaded_file: Mutex::new(None),
+            tmpls: Mutex::new(None),
             gpu: Mutex::new(HeadlessRenderer::try_new()),
             audio_tx: Mutex::new(audio_tx),
         }

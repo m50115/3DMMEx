@@ -5,6 +5,7 @@
 
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -66,7 +67,15 @@ pub fn open_file(path: String, state: State<AppState>) -> Result<MovieInfo, Stri
     if let Some(base) = parent {
         let candidate = base.join("content-files");
         if candidate.exists() {
-            *state.content_dir.lock().unwrap() = Some(candidate);
+            *state.content_dir.lock().unwrap() = Some(candidate.clone());
+            // Pre-parse tmpls.3cn once; reused by every render_scene_frame call.
+            let tmpls_path = candidate.join("tmpls.3cn");
+            if let Ok(f) = std::fs::File::open(&tmpls_path) {
+                let mut r = BufReader::new(f);
+                if let Ok(cf) = ChunkyFile::read(&mut r) {
+                    *state.tmpls.lock().unwrap() = Some(Arc::new(cf));
+                }
+            }
         }
     }
 
@@ -141,20 +150,13 @@ pub fn render_demo_frame(
     height: u32,
     state: State<AppState>,
 ) -> Result<String, String> {
-    let content_dir = state.content_dir.lock().unwrap().clone()
-        .ok_or_else(|| "Content directory not set (open a .3mm file first)".to_string())?;
+    let tmpls = state.tmpls.lock().unwrap().clone()
+        .ok_or_else(|| "tmpls.3cn not loaded (open a .3mm file first)".to_string())?;
 
-    let tmpls_path = content_dir.join("tmpls.3cn");
-    let file = std::fs::File::open(&tmpls_path)
-        .map_err(|e| format!("Cannot open tmpls.3cn: {e}"))?;
-    let mut reader = BufReader::new(file);
-    let cfl = ChunkyFile::read(&mut reader)
-        .map_err(|e| format!("Parse tmpls.3cn: {e}"))?;
-
-    let model = cfl.chunks.iter()
+    let model = tmpls.chunks.iter()
         .filter(|c| c.id.ctg == CTG_BMDL)
         .find_map(|c| {
-            let data = cfl.get_chunk_data(c.id.ctg, c.id.cno).ok()?;
+            let data = tmpls.get_chunk_data(c.id.ctg, c.id.cno).ok()?;
             if data.len() < 80 { return None; }
             let m = Model::from_bytes(&data).ok()?;
             if m.has_valid_faces() && !m.vertices.is_empty() { Some(m) } else { None }
@@ -188,9 +190,6 @@ pub fn render_scene_frame(
     height: u32,
     state: State<AppState>,
 ) -> Result<String, String> {
-    let content_dir = state.content_dir.lock().unwrap().clone()
-        .ok_or_else(|| "Content directory not set".to_string())?;
-
     // --- Step 1: locate SCEN chunk and extract actor tag_tmpls + transforms --
     // Each entry: (tmpl_ctg, tmpl_cno, world_transform)
     // world_transform = translation by (route[0].position + dxyz_full_rte).
@@ -306,13 +305,9 @@ pub fn render_scene_frame(
         return Err(format!("No actors with valid templates"));
     }
 
-    // --- Step 2: open tmpls.3cn and find a renderable BMDL ---------------
-    let tmpls_path = content_dir.join("tmpls.3cn");
-    let file = std::fs::File::open(&tmpls_path)
-        .map_err(|e| format!("Cannot open tmpls.3cn: {e}"))?;
-    let mut reader = BufReader::new(file);
-    let tmpls = ChunkyFile::read(&mut reader)
-        .map_err(|e| format!("Parse tmpls.3cn: {e}"))?;
+    // --- Step 2: look up cached tmpls.3cn (parsed once at file open) --------
+    let tmpls = state.tmpls.lock().unwrap().clone()
+        .ok_or_else(|| "tmpls.3cn not loaded".to_string())?;
 
     // Collect all renderable models for the scene (one per actor with a valid TMPL).
     let mut models: Vec<(Model, glam::Mat4)> = Vec::new();
