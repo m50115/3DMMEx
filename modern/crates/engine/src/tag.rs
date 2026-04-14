@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use crate::error::EngineError;
+
 // ── Movie / Scene / Actor chunk types ──────────────────────────────────────
 
 /// Root movie chunk.
@@ -144,6 +146,21 @@ impl fmt::Display for TagOnFile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TAG(sid={} {}/{:#010x})", self.sid, self.ctg_str(), self.cno)
     }
+}
+
+/// Parse a TAGF struct from a runtime-sized byte slice.
+///
+/// Accepts exactly 16 bytes (the on-disk TAGF layout).  Returns an error if
+/// `bytes.len() != 16`.
+pub fn parse_tagf(bytes: &[u8]) -> Result<TagOnFile, EngineError> {
+    if bytes.len() != TagOnFile::SIZE {
+        return Err(EngineError::UnexpectedEof {
+            what: "TAGF",
+            need: TagOnFile::SIZE,
+            got: bytes.len(),
+        });
+    }
+    Ok(TagOnFile::from_le_bytes(bytes.try_into().unwrap()))
 }
 
 // ── Runtime Tag ─────────────────────────────────────────────────────────────

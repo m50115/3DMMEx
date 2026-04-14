@@ -19,3 +19,4 @@ pub mod scene;
 pub mod movie;
 pub mod msnd;
 pub mod tdf;
+pub mod tdt;
