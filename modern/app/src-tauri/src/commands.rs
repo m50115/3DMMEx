@@ -20,6 +20,7 @@ use engine::fixedpoint::FixedAngle;
 use engine::model::Model;
 use engine::msnd::MovieSound;
 use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MSND, CTG_PATH, CTG_SCEN, CTG_TDF, CTG_TDT, CTG_TMPL, CTG_WAVE};
+use engine::tdf::BrTdf;
 use engine::tdt::BrTdt;
 use engine::transform::RoutePoint;
 use renderer::convert::orient_to_rotation_mat4;
@@ -357,36 +358,71 @@ pub(crate) fn render_to_rgba(
                         }
                     };
 
-                    // M4: render only the first character
-                    let first_char = stn.as_bytes()[0];
-                    let glyph_child = match tdf_chunk.children.iter()
-                        .find(|ch| ch.id.ctg == CTG_BMDL && ch.chid == first_char as u32)
+                    // Parse TDF to get per-char x spacing (dxr[])
+                    let tdf = match tdfs_cfl.get_chunk_data(CTG_TDF, tdf_cno)
+                        .ok()
+                        .and_then(|d| BrTdf::from_bytes(&d).ok())
                     {
-                        Some(c) => c,
+                        Some(t) => t,
                         None => {
-                            diag.push(format!(
-                                "TMPL:{cno} glyph '{}' (0x{first_char:02x}) missing in TDF:{tdf_cno}",
-                                first_char as char
-                            ));
+                            diag.push(format!("TMPL:{cno} TDF:{tdf_cno} failed to parse"));
                             continue;
                         }
                     };
 
-                    let bmdl_key = (CTG_BMDL, glyph_child.id.cno);
-                    if !gpu.has_mesh(bmdl_key) {
-                        if let Ok(data) = tdfs_cfl.get_chunk_data(CTG_BMDL, glyph_child.id.cno) {
-                            if let Ok(m) = Model::from_bytes(&data) {
-                                gpu.ensure_mesh(bmdl_key, &m);
+                    // Build cumulative x offsets: x[0]=0, x[i+1]=x[i]+dxr[char_i]
+                    // Characters outside the font's cch range fall back to dxr[0] spacing.
+                    let chars: Vec<u8> = stn.bytes()
+                        .filter(|&b| b >= 0x20) // skip control chars
+                        .collect();
+
+                    if chars.is_empty() {
+                        diag.push(format!("TMPL:{cno} stn has no printable chars"));
+                        continue;
+                    }
+
+                    // Compute x positions and total width using per-char dxr.
+                    // dxr is indexed by character position in the font (0..cch).
+                    // For chars outside the font range we use a fallback spacing of dxr[0].
+                    let fallback_dx = if tdf.dxr.is_empty() { 1.0f32 } else { tdf.dxr[0] };
+                    let mut x_offsets: Vec<f32> = Vec::with_capacity(chars.len());
+                    let mut cursor = 0.0f32;
+                    for &ch in &chars {
+                        x_offsets.push(cursor);
+                        let idx = ch as usize;
+                        let dx = if idx < tdf.dxr.len() { tdf.dxr[idx] } else { fallback_dx };
+                        cursor += dx;
+                    }
+                    let total_width = cursor;
+
+                    // Render each glyph with a centering x offset
+                    let mut any_rendered = false;
+                    for (i, &ch) in chars.iter().enumerate() {
+                        // Space (0x20) and chars with no BMDL child: advance x, skip render
+                        let glyph_child = match tdf_chunk.children.iter()
+                            .find(|c| c.id.ctg == CTG_BMDL && c.chid == ch as u32)
+                        {
+                            Some(c) => c,
+                            None => continue, // missing glyph — skip silently
+                        };
+
+                        let bmdl_key = (CTG_BMDL, glyph_child.id.cno);
+                        if !gpu.has_mesh(bmdl_key) {
+                            if let Ok(data) = tdfs_cfl.get_chunk_data(CTG_BMDL, glyph_child.id.cno) {
+                                if let Ok(m) = Model::from_bytes(&data) {
+                                    gpu.ensure_mesh(bmdl_key, &m);
+                                }
                             }
                         }
+                        if gpu.has_mesh(bmdl_key) {
+                            let x = x_offsets[i] - total_width * 0.5;
+                            let char_offset = glam::Mat4::from_translation(glam::vec3(x, 0.0, 0.0));
+                            scene_entries.push((bmdl_key, transform * char_offset));
+                            any_rendered = true;
+                        }
                     }
-                    if gpu.has_mesh(bmdl_key) {
-                        scene_entries.push((bmdl_key, transform));
-                    } else {
-                        diag.push(format!(
-                            "TMPL:{cno} glyph '{}' BMDL:{} not renderable",
-                            first_char as char, glyph_child.id.cno
-                        ));
+                    if !any_rendered {
+                        diag.push(format!("TMPL:{cno} stn=\"{stn}\" — no renderable glyphs"));
                     }
                     continue;
                 }
