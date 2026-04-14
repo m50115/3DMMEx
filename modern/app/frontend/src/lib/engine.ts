@@ -52,6 +52,25 @@ export async function updateActorPosition(
   return invoke<void>("update_actor_position", { sceneIdx, actorIdx, dx, dy, dz });
 }
 
+export async function updateActorFrameRange(
+  sceneIdx: number,
+  actorIdx: number,
+  nfrmFirst: number,
+  nfrmLast: number,
+): Promise<void> {
+  return invoke<void>("update_actor_frame_range", { sceneIdx, actorIdx, nfrmFirst, nfrmLast });
+}
+
+export async function updateActorOrientation(
+  sceneIdx: number,
+  actorIdx: number,
+  xaDeg: number,
+  yaDeg: number,
+  zaDeg: number,
+): Promise<void> {
+  return invoke<void>("update_actor_orientation", { sceneIdx, actorIdx, xaDeg, yaDeg, zaDeg });
+}
+
 /** Save to original path (no arg) or a new path. Returns the saved path. */
 export async function saveFile(path?: string): Promise<string> {
   return invoke<string>("save_file", { path: path ?? null });

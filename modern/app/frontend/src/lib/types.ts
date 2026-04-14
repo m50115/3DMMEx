@@ -26,4 +26,7 @@ export interface ActorInfo {
   dz: number;
   nfrm_first: number;
   nfrm_last: number;
+  xa_deg: number;
+  ya_deg: number;
+  za_deg: number;
 }

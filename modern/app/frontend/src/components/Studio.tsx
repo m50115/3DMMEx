@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import { openFile, getSceneList, listSounds, playSound, getSceneActors, updateActorPosition, saveFile } from "../lib/engine";
+import { openFile, getSceneList, listSounds, playSound, getSceneActors, updateActorPosition, updateActorFrameRange, updateActorOrientation, saveFile } from "../lib/engine";
 import type { MovieInfo, SceneInfo, SoundEntry, ActorInfo } from "../lib/types";
 import { Timeline } from "./Timeline";
 import { Viewport } from "./Viewport";
@@ -40,6 +40,11 @@ export function Studio() {
   const [editDx, setEditDx] = useState("0");
   const [editDy, setEditDy] = useState("0");
   const [editDz, setEditDz] = useState("0");
+  const [editNfrmFirst, setEditNfrmFirst] = useState("0");
+  const [editNfrmLast, setEditNfrmLast] = useState("0");
+  const [editXaDeg, setEditXaDeg] = useState("0");
+  const [editYaDeg, setEditYaDeg] = useState("0");
+  const [editZaDeg, setEditZaDeg] = useState("0");
 
   // Playback loop — recursive setTimeout so frames don't queue when render is slow.
   const playingRef = useRef(playing);
@@ -184,6 +189,11 @@ export function Studio() {
     setEditDx(actor.dx.toFixed(4));
     setEditDy(actor.dy.toFixed(4));
     setEditDz(actor.dz.toFixed(4));
+    setEditNfrmFirst(String(actor.nfrm_first));
+    setEditNfrmLast(String(actor.nfrm_last));
+    setEditXaDeg(actor.xa_deg.toFixed(2));
+    setEditYaDeg(actor.ya_deg.toFixed(2));
+    setEditZaDeg(actor.za_deg.toFixed(2));
   }, []);
 
   const handleApplyPosition = useCallback(async () => {
@@ -204,6 +214,41 @@ export function Studio() {
       setStatusMsg(`Update failed: ${err}`);
     }
   }, [selectedActorIdx, activeScene, editDx, editDy, editDz, currentFrame]);
+
+  const handleApplyFrameRange = useCallback(async () => {
+    if (selectedActorIdx === null) return;
+    const nfrmFirst = parseInt(editNfrmFirst) || 0;
+    const nfrmLast  = parseInt(editNfrmLast)  || 0;
+    try {
+      await updateActorFrameRange(activeScene, selectedActorIdx, nfrmFirst, nfrmLast);
+      const updated = await getSceneActors(activeScene);
+      setActors(updated);
+      setFrameLoading(true);
+      setFrameError(null);
+      setFrameSrc(streamUrl(activeScene, currentFrame));
+      setStatusMsg(`Actor ${selectedActorIdx} frame range updated.`);
+    } catch (err) {
+      setStatusMsg(`Frame range update failed: ${err}`);
+    }
+  }, [selectedActorIdx, activeScene, editNfrmFirst, editNfrmLast, currentFrame]);
+
+  const handleApplyOrientation = useCallback(async () => {
+    if (selectedActorIdx === null) return;
+    const xaDeg = parseFloat(editXaDeg) || 0;
+    const yaDeg = parseFloat(editYaDeg) || 0;
+    const zaDeg = parseFloat(editZaDeg) || 0;
+    try {
+      await updateActorOrientation(activeScene, selectedActorIdx, xaDeg, yaDeg, zaDeg);
+      const updated = await getSceneActors(activeScene);
+      setActors(updated);
+      setFrameLoading(true);
+      setFrameError(null);
+      setFrameSrc(streamUrl(activeScene, currentFrame));
+      setStatusMsg(`Actor ${selectedActorIdx} orientation updated.`);
+    } catch (err) {
+      setStatusMsg(`Orientation update failed: ${err}`);
+    }
+  }, [selectedActorIdx, activeScene, editXaDeg, editYaDeg, editZaDeg, currentFrame]);
 
   const handleSave = useCallback(async () => {
     try {
@@ -338,13 +383,78 @@ export function Studio() {
                     />
                   </div>
                 ))}
-                <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                <button
+                  className="btn-primary"
+                  style={{ width: '100%', fontSize: 11, padding: '4px 0', marginTop: 8 }}
+                  onClick={handleApplyPosition}
+                >
+                  Apply Position
+                </button>
+
+                {/* Frame range */}
+                <div className="sidebar-title" style={{ padding: '8px 0 4px', border: 'none', borderTop: '1px solid var(--border)', marginTop: 8 }}>
+                  Frame Range
+                </div>
+                {[
+                  { label: 'First', value: editNfrmFirst, set: setEditNfrmFirst },
+                  { label: 'Last',  value: editNfrmLast,  set: setEditNfrmLast  },
+                ].map(({ label, value, set }) => (
+                  <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <span style={{ width: 30, fontSize: 11, color: 'var(--text-dim)' }}>{label}</span>
+                    <input
+                      type="number"
+                      step="1"
+                      value={value}
+                      onChange={(e) => set(e.target.value)}
+                      style={{
+                        flex: 1, background: 'var(--bg)', border: '1px solid var(--border)',
+                        color: 'var(--text)', borderRadius: 3, padding: '2px 6px',
+                        fontSize: 12, fontFamily: 'monospace',
+                      }}
+                    />
+                  </div>
+                ))}
+                <button
+                  className="btn-primary"
+                  style={{ width: '100%', fontSize: 11, padding: '4px 0', marginTop: 4 }}
+                  onClick={handleApplyFrameRange}
+                >
+                  Apply Frame Range
+                </button>
+
+                {/* Rotation */}
+                <div className="sidebar-title" style={{ padding: '8px 0 4px', border: 'none', borderTop: '1px solid var(--border)', marginTop: 8 }}>
+                  Rotation (degrees)
+                </div>
+                {[
+                  { label: 'Pitch', value: editXaDeg, set: setEditXaDeg },
+                  { label: 'Yaw',   value: editYaDeg, set: setEditYaDeg },
+                  { label: 'Roll',  value: editZaDeg, set: setEditZaDeg },
+                ].map(({ label, value, set }) => (
+                  <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <span style={{ width: 30, fontSize: 11, color: 'var(--text-dim)' }}>{label}</span>
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      max="359"
+                      value={value}
+                      onChange={(e) => set(e.target.value)}
+                      style={{
+                        flex: 1, background: 'var(--bg)', border: '1px solid var(--border)',
+                        color: 'var(--text)', borderRadius: 3, padding: '2px 6px',
+                        fontSize: 12, fontFamily: 'monospace',
+                      }}
+                    />
+                  </div>
+                ))}
+                <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
                   <button
                     className="btn-primary"
                     style={{ flex: 1, fontSize: 11, padding: '4px 0' }}
-                    onClick={handleApplyPosition}
+                    onClick={handleApplyOrientation}
                   >
-                    Apply
+                    Apply Rotation
                   </button>
                   <button
                     className="btn-primary"

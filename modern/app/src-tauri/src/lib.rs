@@ -20,6 +20,8 @@ pub fn run() {
             commands::play_sound,
             commands::get_scene_actors,
             commands::update_actor_position,
+            commands::update_actor_frame_range,
+            commands::update_actor_orientation,
             commands::save_file,
         ])
         .run(tauri::generate_context!())

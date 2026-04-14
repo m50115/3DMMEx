@@ -15,7 +15,8 @@ use audio::decode_wav;
 use chunky_format::collections::GenericGroup;
 use chunky_format::ChunkyFile;
 use engine::actor::ActorOnFile;
-use engine::events::{ActorEvent, EventPayload};
+use engine::events::{ActorEvent, EventPayload, OrientPayload, aet};
+use engine::fixedpoint::FixedAngle;
 use engine::model::Model;
 use engine::msnd::MovieSound;
 use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MSND, CTG_PATH, CTG_SCEN, CTG_TMPL, CTG_WAVE};
@@ -500,6 +501,12 @@ pub struct ActorInfo {
     pub dz: f32,
     pub nfrm_first: i32,
     pub nfrm_last: i32,
+    /// Initial orientation — pitch in degrees (BRA → 0-360)
+    pub xa_deg: f32,
+    /// Initial orientation — yaw in degrees
+    pub ya_deg: f32,
+    /// Initial orientation — roll in degrees
+    pub za_deg: f32,
 }
 
 /// Return the list of actors in a scene with their current positions.
@@ -536,6 +543,38 @@ pub fn get_scene_actors(
         let dy = actor.dxyz_full_rte.y.0 as f32 / 65536.0;
         let dz = actor.dxyz_full_rte.z.0 as f32 / 65536.0;
 
+        // Read initial orientation from the GGAE Orient event with the smallest nfrm.
+        let mut xa_deg = 0.0f32;
+        let mut ya_deg = 0.0f32;
+        let mut za_deg = 0.0f32;
+        {
+            let actr_top = lf.cfl.chunks.iter()
+                .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == cno);
+            if let Some(actr) = actr_top {
+                if let Some(ggae_ref) = actr.children.iter().find(|ch| ch.id.ctg == CTG_GGAE) {
+                    if let Ok(ggae_data) = lf.cfl.get_chunk_data(ggae_ref.id.ctg, ggae_ref.id.cno) {
+                        if let Ok(gg) = GenericGroup::read(&ggae_data) {
+                            let mut best_nfrm = i32::MAX;
+                            for (fe, ve) in gg.fixed_entries.iter().zip(gg.variable_entries.iter()) {
+                                if fe.len() < 20 { continue; }
+                                let fixed_arr: &[u8; 20] = fe[..20].try_into().unwrap();
+                                if let Ok(evt) = ActorEvent::parse(fixed_arr, ve) {
+                                    if let EventPayload::Orient(op) = &evt.payload {
+                                        if evt.header.nfrm < best_nfrm {
+                                            best_nfrm = evt.header.nfrm;
+                                            xa_deg = op.xa.to_degrees() as f32;
+                                            ya_deg = op.ya.to_degrees() as f32;
+                                            za_deg = op.za.to_degrees() as f32;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         actors.push(ActorInfo {
             actor_idx: idx,
             cno,
@@ -544,6 +583,9 @@ pub fn get_scene_actors(
             dz,
             nfrm_first: actor.nfrm_first,
             nfrm_last: actor.nfrm_last,
+            xa_deg,
+            ya_deg,
+            za_deg,
         });
     }
 
@@ -598,6 +640,129 @@ pub fn update_actor_position(
     new_raw[12..16].copy_from_slice(&z_fixed.to_le_bytes());
 
     lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), new_raw);
+    Ok(())
+}
+
+/// Edit an actor's frame range (nfrm_first / nfrm_last) in memory.
+///
+/// Changes are reflected immediately in subsequent stream:// renders.
+/// Call `save_file` to persist to disk.
+#[tauri::command]
+pub fn update_actor_frame_range(
+    scene_idx: usize,
+    actor_idx: usize,
+    nfrm_first: i32,
+    nfrm_last: i32,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let mut guard = state.loaded_file.lock().unwrap();
+    let lf = guard.as_mut().ok_or("No file loaded")?;
+
+    let actr_cno = {
+        let scen = lf.cfl.chunks.iter()
+            .filter(|c| c.id.ctg == CTG_SCEN)
+            .nth(scene_idx)
+            .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
+        scen.children.iter()
+            .filter(|c| c.id.ctg == CTG_ACTR)
+            .nth(actor_idx)
+            .ok_or_else(|| format!("Actor {actor_idx} not found in scene {scene_idx}"))?
+            .id.cno
+    };
+
+    let raw = lf.cfl.chunk_data
+        .get(&(CTG_ACTR, actr_cno))
+        .ok_or_else(|| format!("ACTR chunk cno={actr_cno} not in chunk_data"))?
+        .clone();
+
+    if raw.len() < ActorOnFile::SIZE {
+        return Err(format!("ACTR chunk cno={actr_cno} too small: {} bytes", raw.len()));
+    }
+
+    // nfrm_first=[20..24], nfrm_last=[24..28]
+    let mut new_raw = raw;
+    new_raw[20..24].copy_from_slice(&nfrm_first.to_le_bytes());
+    new_raw[24..28].copy_from_slice(&nfrm_last.to_le_bytes());
+    lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), new_raw);
+    Ok(())
+}
+
+/// Edit an actor's initial orientation (xa/ya/za in degrees) in memory.
+///
+/// Modifies the GGAE Orient event at nfrm=0; inserts one if absent.
+/// Returns an error if the actor has no GGAE chunk.
+#[tauri::command]
+pub fn update_actor_orientation(
+    scene_idx: usize,
+    actor_idx: usize,
+    xa_deg: f32,
+    ya_deg: f32,
+    za_deg: f32,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let mut guard = state.loaded_file.lock().unwrap();
+    let lf = guard.as_mut().ok_or("No file loaded")?;
+
+    // Resolve (scene_idx, actor_idx) → ACTR cno
+    let actr_cno = {
+        let scen = lf.cfl.chunks.iter()
+            .filter(|c| c.id.ctg == CTG_SCEN)
+            .nth(scene_idx)
+            .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
+        scen.children.iter()
+            .filter(|c| c.id.ctg == CTG_ACTR)
+            .nth(actor_idx)
+            .ok_or_else(|| format!("Actor {actor_idx} not found in scene {scene_idx}"))?
+            .id.cno
+    };
+
+    // Find GGAE child cno
+    let ggae_cno = {
+        let actr_top = lf.cfl.chunks.iter()
+            .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == actr_cno)
+            .ok_or_else(|| format!("ACTR top-level chunk cno={actr_cno} not found"))?;
+        actr_top.children.iter()
+            .find(|ch| ch.id.ctg == CTG_GGAE)
+            .ok_or_else(|| format!("Actor {actor_idx} has no GGAE chunk; cannot set orientation"))?
+            .id.cno
+    };
+
+    let ggae_raw = lf.cfl.chunk_data
+        .get(&(CTG_GGAE, ggae_cno))
+        .ok_or_else(|| format!("GGAE chunk cno={ggae_cno} not in chunk_data"))?
+        .clone();
+
+    let mut gg = GenericGroup::read(&ggae_raw)
+        .map_err(|e| format!("Parse GGAE: {e}"))?;
+
+    let new_orient = OrientPayload {
+        xa: FixedAngle::from_degrees(xa_deg as f64),
+        ya: FixedAngle::from_degrees(ya_deg as f64),
+        za: FixedAngle::from_degrees(za_deg as f64),
+    };
+
+    // Find existing Orient event at nfrm=0
+    let orient_idx = gg.fixed_entries.iter().position(|fe| {
+        if fe.len() < 8 { return false; }
+        let aet_val = i32::from_le_bytes(fe[0..4].try_into().unwrap());
+        let nfrm   = i32::from_le_bytes(fe[4..8].try_into().unwrap());
+        aet_val == aet::ORIENT && nfrm == 0
+    });
+
+    if let Some(idx) = orient_idx {
+        gg.variable_entries[idx] = new_orient.to_le_bytes().to_vec();
+    } else {
+        // Insert new Orient event: 20-byte fixed header (aet=ORIENT, nfrm=0, rtel=zeros)
+        let fixed_size = gg.fixed_size as usize;
+        let mut fixed = vec![0u8; fixed_size];
+        if fixed_size >= 4 {
+            fixed[0..4].copy_from_slice(&aet::ORIENT.to_le_bytes());
+        }
+        gg.fixed_entries.push(fixed);
+        gg.variable_entries.push(new_orient.to_le_bytes().to_vec());
+    }
+
+    lf.cfl.chunk_data.insert((CTG_GGAE, ggae_cno), gg.write());
     Ok(())
 }
 
