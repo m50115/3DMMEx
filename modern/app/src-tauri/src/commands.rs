@@ -929,26 +929,30 @@ fn build_pcm_wav(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
 
 /// Find the content-files/ directory by walking up the directory tree.
 ///
-/// Checks two search roots in order:
+/// Searches three roots in order:
 /// 1. Walk up from the .3mm file's location.
-/// 2. Walk up from the current executable's location.
+/// 2. Walk up from the current working directory (Tauri dev sets cwd to src-tauri/).
+/// 3. Walk up from the current executable's location.
 ///
 /// This handles fan movies stored in a directory tree unrelated to the
-/// 3DMMEx project (e.g. /Users/Shared/exports/) — the executable lives
+/// 3DMMEx project (e.g. /Users/Shared/exports/) — the cwd or executable lives
 /// inside the project tree where content-files/ is easily found.
 fn find_content_dir(movie_path: &std::path::Path) -> Option<PathBuf> {
-    // Walk up from the movie file
-    let mut dir = movie_path.parent();
-    while let Some(d) = dir {
-        let candidate = d.join("content-files");
-        if candidate.is_dir() {
-            return Some(candidate);
+    let roots: Vec<PathBuf> = {
+        let mut v = Vec::new();
+        // Root 1: directory containing the movie file
+        if let Some(p) = movie_path.parent() { v.push(p.to_path_buf()); }
+        // Root 2: current working directory
+        if let Ok(cwd) = std::env::current_dir() { v.push(cwd); }
+        // Root 3: directory containing the executable
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(p) = exe.parent() { v.push(p.to_path_buf()); }
         }
-        dir = d.parent();
-    }
-    // Walk up from the executable (works when fan movies are outside the project tree)
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent();
+        v
+    };
+
+    for root in roots {
+        let mut dir: Option<&std::path::Path> = Some(root.as_path());
         while let Some(d) = dir {
             let candidate = d.join("content-files");
             if candidate.is_dir() {
