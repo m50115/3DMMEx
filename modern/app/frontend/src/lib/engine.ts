@@ -18,6 +18,16 @@ export async function renderDemoFrame(
   return invoke<string>("render_demo_frame", { width, height });
 }
 
+// frame is 0-indexed in the frontend; backend expects 1-indexed (3DMM convention).
+export async function renderSceneFrame(
+  sceneIdx: number,
+  frame: number,
+  width: number,
+  height: number,
+): Promise<string> {
+  return invoke<string>("render_scene_frame", { sceneIdx, frame: frame + 1, width, height });
+}
+
 export async function listSounds(): Promise<SoundEntry[]> {
   return invoke<SoundEntry[]>("list_sounds");
 }

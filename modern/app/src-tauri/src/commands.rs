@@ -11,11 +11,15 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use audio::decode_wav;
+use chunky_format::collections::GenericGroup;
 use chunky_format::ChunkyFile;
+use engine::actor::ActorOnFile;
+use engine::events::{ActorEvent, EventPayload};
 use engine::model::Model;
 use engine::msnd::MovieSound;
-use engine::scene::SceneHeader;
-use engine::tag::{CTG_BMDL, CTG_MSND, CTG_SCEN, CTG_WAVE};
+use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MSND, CTG_PATH, CTG_SCEN, CTG_TMPL, CTG_WAVE};
+use engine::transform::RoutePoint;
+use renderer::convert::orient_to_rotation_mat4;
 
 use crate::state::{AppState, LoadedFile};
 
@@ -75,15 +79,20 @@ pub fn open_file(path: String, state: State<AppState>) -> Result<MovieInfo, Stri
     let mut total_frames: i32 = 0;
 
     for (idx, chunk) in scen_entries.iter().enumerate() {
-        let frame_count = match cfl.get_chunk_data(chunk.id.ctg, chunk.id.cno) {
-            Ok(data) if data.len() >= SceneHeader::SIZE => {
-                let arr: [u8; 16] = data[..16].try_into().unwrap();
-                SceneHeader::from_bytes(&arr)
-                    .map(|h| h.nfrm_mac)
-                    .unwrap_or(0)
-            }
-            _ => 0,
-        };
+        // Real scene duration = max(nfrm_last) across all actors.
+        // SceneHeader.nfrm_mac is NOT the frame count — it stores the
+        // highest scene-level event frame, which is often 1 or 0.
+        let frame_count: i32 = chunk.children.iter()
+            .filter(|c| c.id.ctg == CTG_ACTR)
+            .filter_map(|c| cfl.get_chunk_data(c.id.ctg, c.id.cno).ok())
+            .filter(|d| d.len() >= ActorOnFile::SIZE)
+            .filter_map(|d| {
+                let arr: [u8; 44] = d[..44].try_into().ok()?;
+                ActorOnFile::from_bytes(&arr).ok()
+            })
+            .map(|a| a.nfrm_last)
+            .max()
+            .unwrap_or(0);
 
         // Count ACTR children of this SCEN chunk.
         let actor_count = chunk.children.len();
@@ -157,6 +166,223 @@ pub fn render_demo_frame(
         .ok_or_else(|| "No GPU adapter available".to_string())?;
 
     let rgba = gpu.render_model(&model, width, height);
+    if rgba.is_empty() {
+        return Err("Render produced empty output".into());
+    }
+
+    let png_bytes = encode_rgba_to_png(&rgba, width, height)?;
+    let b64 = base64::prelude::BASE64_STANDARD.encode(&png_bytes);
+    Ok(format!("data:image/png;base64,{b64}"))
+}
+
+/// Render actor models for a specific scene at a given frame.
+///
+/// `frame` is 1-indexed (matches 3DMM's internal nfrm_first/nfrm_last).
+/// Actors whose active range [nfrm_first, nfrm_last] does not include
+/// `frame` are omitted from the render.
+#[tauri::command]
+pub fn render_scene_frame(
+    scene_idx: usize,
+    frame: i32,
+    width: u32,
+    height: u32,
+    state: State<AppState>,
+) -> Result<String, String> {
+    let content_dir = state.content_dir.lock().unwrap().clone()
+        .ok_or_else(|| "Content directory not set".to_string())?;
+
+    // --- Step 1: locate SCEN chunk and extract actor tag_tmpls + transforms --
+    // Each entry: (tmpl_ctg, tmpl_cno, world_transform)
+    // world_transform = translation by (route[0].position + dxyz_full_rte).
+    let tag_tmpls: Vec<(u32, u32, glam::Mat4)> = {
+        let guard = state.loaded_file.lock().unwrap();
+        let lf = guard.as_ref().ok_or("No file loaded")?;
+
+        let scen_chunk = lf.cfl.chunks.iter()
+            .filter(|c| c.id.ctg == CTG_SCEN)
+            .nth(scene_idx)
+            .ok_or_else(|| format!("Scene index {scene_idx} out of range"))?;
+
+        let mut tags = Vec::new();
+        for child in scen_chunk.children.iter().filter(|c| c.id.ctg == CTG_ACTR) {
+            let data = match lf.cfl.get_chunk_data(child.id.ctg, child.id.cno) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if data.len() < ActorOnFile::SIZE { continue; }
+            let arr: [u8; 44] = data[..44].try_into().unwrap();
+            let actf = match ActorOnFile::from_bytes(&arr) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            if !actf.tag_tmpl.is_null() && actf.tag_tmpl.cno != 0 {
+                // Frame filter: frames are 1-indexed in 3DMM.
+                // Skip actors whose active range doesn't include this frame.
+                let has_range = actf.nfrm_last > actf.nfrm_first;
+                if has_range && (frame < actf.nfrm_first || frame > actf.nfrm_last) {
+                    continue;
+                }
+
+                // Parse PATH GL sub-chunk to get route[0] world position.
+                // GL header: [bo:i16][osk:i16][cbEntry:i32=16][ivMac:i32] + RoutePoint×ivMac
+                let translation = 'path: {
+                    // Find PATH child of this ACTR chunk within the main .3mm file.
+                    // The ACTR chunk in cfl.chunks has children; find one with CTG_PATH.
+                    let actr_top = lf.cfl.chunks.iter()
+                        .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
+                    let path_child = actr_top
+                        .and_then(|a| a.children.iter().find(|ch| ch.id.ctg == CTG_PATH));
+                    if let Some(pc) = path_child {
+                        if let Ok(path_data) = lf.cfl.get_chunk_data(pc.id.ctg, pc.id.cno) {
+                            const GL_HDR: usize = 12;
+                            const RPT_SIZE: usize = RoutePoint::SIZE; // 16
+                            if path_data.len() >= GL_HDR + RPT_SIZE {
+                                let iv_mac = i32::from_le_bytes(
+                                    path_data[8..12].try_into().unwrap()
+                                );
+                                if iv_mac >= 1 {
+                                    let rpt_bytes: &[u8; 16] = path_data[GL_HDR..GL_HDR + RPT_SIZE]
+                                        .try_into().unwrap();
+                                    let rpt = RoutePoint::from_le_bytes(rpt_bytes);
+                                    let dx = actf.dxyz_full_rte.x;
+                                    let dy = actf.dxyz_full_rte.y;
+                                    let dz = actf.dxyz_full_rte.z;
+                                    let x = (rpt.position.x.0 + dx.0) as f64 / 65536.0;
+                                    let y = (rpt.position.y.0 + dy.0) as f64 / 65536.0;
+                                    let z = (rpt.position.z.0 + dz.0) as f64 / 65536.0;
+                                    break 'path glam::Mat4::from_translation(
+                                        glam::Vec3::new(x as f32, y as f32, z as f32)
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    glam::Mat4::IDENTITY
+                };
+
+                // Parse GGAE GG sub-chunk to get actor orientation at this frame.
+                // Orientation = last AEV_ORIENT event where nfrm <= frame (keyframe semantics).
+                let rotation = 'ggae: {
+                    let actr_top = lf.cfl.chunks.iter()
+                        .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
+                    let ggae_child = actr_top
+                        .and_then(|a| a.children.iter().find(|ch| ch.id.ctg == CTG_GGAE));
+                    if let Some(gc) = ggae_child {
+                        if let Ok(ggae_data) = lf.cfl.get_chunk_data(gc.id.ctg, gc.id.cno) {
+                            if let Ok(gg) = GenericGroup::read(&ggae_data) {
+                                let mut last_rot: Option<glam::Mat4> = None;
+                                let mut last_nfrm = i32::MIN;
+                                for (fixed_bytes, var_bytes) in gg.fixed_entries.iter()
+                                    .zip(gg.variable_entries.iter())
+                                {
+                                    if fixed_bytes.len() < 20 { continue; }
+                                    let fixed_arr: &[u8; 20] = fixed_bytes[..20].try_into().unwrap();
+                                    if let Ok(evt) = ActorEvent::parse(fixed_arr, var_bytes) {
+                                        if let EventPayload::Orient(op) = &evt.payload {
+                                            if evt.header.nfrm <= frame && evt.header.nfrm >= last_nfrm {
+                                                last_nfrm = evt.header.nfrm;
+                                                last_rot = Some(orient_to_rotation_mat4(op));
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(rot) = last_rot {
+                                    break 'ggae rot;
+                                }
+                            }
+                        }
+                    }
+                    glam::Mat4::IDENTITY
+                };
+
+                let transform = translation * rotation;
+                tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, transform));
+            }
+        }
+        tags
+    };
+
+    if tag_tmpls.is_empty() {
+        return Err(format!("No actors with valid templates"));
+    }
+
+    // --- Step 2: open tmpls.3cn and find a renderable BMDL ---------------
+    let tmpls_path = content_dir.join("tmpls.3cn");
+    let file = std::fs::File::open(&tmpls_path)
+        .map_err(|e| format!("Cannot open tmpls.3cn: {e}"))?;
+    let mut reader = BufReader::new(file);
+    let tmpls = ChunkyFile::read(&mut reader)
+        .map_err(|e| format!("Parse tmpls.3cn: {e}"))?;
+
+    // Collect all renderable models for the scene (one per actor with a valid TMPL).
+    let mut models: Vec<(Model, glam::Mat4)> = Vec::new();
+    let mut diag: Vec<String> = Vec::new();
+
+    for &(ctg, cno, transform) in &tag_tmpls {
+        let ctg_str: String = ctg.to_be_bytes().iter()
+            .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
+            .collect();
+        if ctg == CTG_TMPL {
+            let tmpl_opt = tmpls.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == cno);
+            let tmpl = match tmpl_opt {
+                Some(t) => t,
+                None => { diag.push(format!("TMPL:{cno} not in tmpls.3cn")); continue; }
+            };
+            let bmdl_children: Vec<_> = tmpl.children.iter().filter(|ch| ch.id.ctg == CTG_BMDL).collect();
+            if bmdl_children.is_empty() {
+                diag.push(format!("TMPL:{cno} has no BMDL children"));
+                continue;
+            }
+            // Take first BMDL child with valid geometry.
+            let mut found = false;
+            for ch in &bmdl_children {
+                match tmpls.get_chunk_data(ch.id.ctg, ch.id.cno) {
+                    Err(e) => { diag.push(format!("BMDL:{} err: {e:?}", ch.id.cno)); }
+                    Ok(data) => {
+                        if data.len() < 80 { continue; }
+                        if let Ok(m) = Model::from_bytes(&data) {
+                            if m.has_valid_faces() && !m.vertices.is_empty() {
+                                models.push((m, transform));
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if !found {
+                diag.push(format!("TMPL:{cno} — no renderable BMDL child"));
+            }
+        } else if ctg == CTG_BMDL {
+            match tmpls.get_chunk_data(CTG_BMDL, cno) {
+                Err(e) => { diag.push(format!("direct BMDL:{cno} err: {e:?}")); }
+                Ok(data) => {
+                    if data.len() >= 80 {
+                        if let Ok(m) = Model::from_bytes(&data) {
+                            if m.has_valid_faces() && !m.vertices.is_empty() {
+                                models.push((m, transform));
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            diag.push(format!("actor ctg='{}' cno={cno} — not TMPL/BMDL", ctg_str));
+        }
+    }
+
+    if models.is_empty() {
+        return Err(format!("No renderable model: {}",
+            if diag.is_empty() { "no actors matched".into() } else { diag.join("; ") }));
+    }
+
+    // --- Step 3: GPU render all models → PNG data URL ---------------------
+    let gpu_guard = state.gpu.lock().unwrap();
+    let gpu = gpu_guard.as_ref()
+        .ok_or_else(|| "No GPU adapter available".to_string())?;
+
+    let model_refs: Vec<(&Model, glam::Mat4)> = models.iter().map(|(m, t)| (m, *t)).collect();
+    let rgba = gpu.render_models(&model_refs, width, height);
     if rgba.is_empty() {
         return Err("Render produced empty output".into());
     }

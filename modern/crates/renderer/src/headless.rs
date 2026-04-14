@@ -7,6 +7,7 @@
 //! Returns `None` / gracefully skips when no GPU adapter is available (CI, no GPU).
 
 use engine::model::Model;
+use glam::Mat4;
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
@@ -47,12 +48,27 @@ impl HeadlessRenderer {
         Some(Self { device, queue })
     }
 
-    /// Render `model` to an offscreen `width × height` texture.
+    /// Render a single `model` to an offscreen `width × height` texture.
     ///
-    /// Returns raw RGBA8 pixel data (row-major, `width * height * 4` bytes).
+    /// Thin wrapper around [`render_models`] with an identity transform.
     /// Returns an empty `Vec` if the model has no renderable faces.
     pub fn render_model(&self, model: &Model, width: u32, height: u32) -> Vec<u8> {
-        if !model.has_valid_faces() || model.vertices.is_empty() {
+        self.render_models(&[(model, Mat4::IDENTITY)], width, height)
+    }
+
+    /// Render one or more models into a single offscreen `width × height` frame.
+    ///
+    /// Each entry is `(model, world_transform)`. The camera auto-fits the
+    /// combined world-space bounding box of all models.
+    /// Returns raw RGBA8 pixel data (`width * height * 4` bytes), or an empty
+    /// `Vec` if no model has renderable geometry.
+    pub fn render_models(&self, models: &[(&Model, Mat4)], width: u32, height: u32) -> Vec<u8> {
+        // Filter to renderable models only.
+        let renderable: Vec<(&Model, Mat4)> = models.iter()
+            .filter(|(m, _)| m.has_valid_faces() && !m.vertices.is_empty())
+            .map(|(m, t)| (*m, *t))
+            .collect();
+        if renderable.is_empty() {
             return Vec::new();
         }
 
@@ -63,16 +79,20 @@ impl HeadlessRenderer {
         // ── pipeline ──────────────────────────────────────────────────────────
         let rp = RenderPipeline::new(device, render_format, width, height);
 
-        // ── mesh ──────────────────────────────────────────────────────────────
-        let mesh = model_to_mesh(model);
+        // ── meshes + combined world-space bounding box ────────────────────────
+        let mesh_transforms: Vec<_> = renderable.iter()
+            .map(|(m, t)| (model_to_mesh(m), *t))
+            .collect();
 
-        // ── auto-fit camera ───────────────────────────────────────────────────
         let (mut min_x, mut min_y, mut min_z) = (f32::MAX, f32::MAX, f32::MAX);
         let (mut max_x, mut max_y, mut max_z) = (f32::MIN, f32::MIN, f32::MIN);
-        for v in &mesh.vertices {
-            min_x = min_x.min(v.position[0]); max_x = max_x.max(v.position[0]);
-            min_y = min_y.min(v.position[1]); max_y = max_y.max(v.position[1]);
-            min_z = min_z.min(v.position[2]); max_z = max_z.max(v.position[2]);
+        for (mesh, transform) in &mesh_transforms {
+            for v in &mesh.vertices {
+                let wp = transform.transform_point3(glam::Vec3::from_array(v.position));
+                min_x = min_x.min(wp.x); max_x = max_x.max(wp.x);
+                min_y = min_y.min(wp.y); max_y = max_y.max(wp.y);
+                min_z = min_z.min(wp.z); max_z = max_z.max(wp.z);
+            }
         }
         let cx = (min_x + max_x) * 0.5;
         let cy = (min_y + max_y) * 0.5;
@@ -94,36 +114,47 @@ impl HeadlessRenderer {
         queue.write_buffer(&rp.camera_buf, 0, bytemuck::bytes_of(&camera.to_gpu()));
         queue.write_buffer(&rp.light_buf, 0, bytemuck::bytes_of(&GpuLight::default()));
 
-        // ── GPU buffers ───────────────────────────────────────────────────────
-        let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vbuf"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ibuf"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let model_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("model_uniform"),
-            contents: bytemuck::bytes_of(&GpuModelUniform::identity()),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let material_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("material_uniform"),
-            contents: bytemuck::bytes_of(&GpuMaterial::default()),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-
         let fallback = Self::white_texture_1x1(device, queue);
-        let instance_bg = rp.create_instance_bind_group(
-            device,
-            &model_buf,
-            &material_buf,
-            &fallback.view,
-            &fallback.sampler,
-        );
+
+        // ── per-model GPU buffers + bind groups ───────────────────────────────
+        struct DrawCall {
+            vertex_buf: wgpu::Buffer,
+            index_buf: wgpu::Buffer,
+            instance_bg: wgpu::BindGroup,
+            index_count: u32,
+        }
+
+        let draw_calls: Vec<DrawCall> = mesh_transforms.iter().enumerate().map(|(i, (mesh, transform))| {
+            let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("vbuf_{i}")),
+                contents: bytemuck::cast_slice(&mesh.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("ibuf_{i}")),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            let model_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("model_uniform_{i}")),
+                contents: bytemuck::bytes_of(&GpuModelUniform::from_transform(transform)),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let material_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("material_uniform_{i}")),
+                contents: bytemuck::bytes_of(&GpuMaterial::default()),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let instance_bg = rp.create_instance_bind_group(
+                device,
+                &model_buf,
+                &material_buf,
+                &fallback.view,
+                &fallback.sampler,
+            );
+            let index_count = mesh.index_count();
+            DrawCall { vertex_buf, index_buf, instance_bg, index_count }
+        }).collect();
 
         // ── offscreen targets ─────────────────────────────────────────────────
         let color_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -176,10 +207,12 @@ impl HeadlessRenderer {
             });
             rpass.set_pipeline(&rp.pipeline);
             rpass.set_bind_group(0, &rp.frame_bind_group, &[]);
-            rpass.set_bind_group(1, &instance_bg, &[]);
-            rpass.set_vertex_buffer(0, vertex_buf.slice(..));
-            rpass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
-            rpass.draw_indexed(0..mesh.index_count(), 0, 0..1);
+            for dc in &draw_calls {
+                rpass.set_bind_group(1, &dc.instance_bg, &[]);
+                rpass.set_vertex_buffer(0, dc.vertex_buf.slice(..));
+                rpass.set_index_buffer(dc.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(0..dc.index_count, 0, 0..1);
+            }
         }
 
         // ── readback ──────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ pub fn run() {
             commands::open_file,
             commands::get_scene_list,
             commands::render_demo_frame,
+            commands::render_scene_frame,
             commands::list_sounds,
             commands::play_sound,
         ])

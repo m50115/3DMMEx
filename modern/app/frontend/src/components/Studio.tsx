@@ -1,7 +1,7 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import { openFile, getSceneList, renderDemoFrame, listSounds, playSound } from "../lib/engine";
+import { openFile, getSceneList, renderSceneFrame, listSounds, playSound } from "../lib/engine";
 import type { MovieInfo, SceneInfo, SoundEntry } from "../lib/types";
 import { Timeline } from "./Timeline";
 import { Viewport } from "./Viewport";
@@ -15,6 +15,46 @@ export function Studio() {
   const [frameError, setFrameError] = useState<string | null>(null);
   const [sounds, setSounds] = useState<SoundEntry[]>([]);
   const [statusMsg, setStatusMsg] = useState("Ready");
+  const [currentFrame, setCurrentFrame] = useState(0);
+  const [playing, setPlaying] = useState(false);
+
+  // Playback loop — recursive setTimeout so frames don't queue when render is slow.
+  const playingRef = useRef(playing);
+  useEffect(() => { playingRef.current = playing; }, [playing]);
+
+  useEffect(() => {
+    if (!playing) return;
+    const scene = scenes[activeScene];
+    if (!scene || scene.frame_count <= 1) {
+      setPlaying(false);
+      return;
+    }
+
+    let active = true;
+    let f = currentFrame;
+
+    (async function loop() {
+      while (active && playingRef.current) {
+        f += 1;
+        if (f >= scene.frame_count) {
+          if (active) { setCurrentFrame(scene.frame_count - 1); setPlaying(false); }
+          return;
+        }
+        if (active) setCurrentFrame(f);
+        try {
+          const url = await renderSceneFrame(activeScene, f, 640, 480);
+          if (active) { setFrameDataUrl(url); setFrameError(null); }
+        } catch (err) {
+          if (active) { setStatusMsg(`Playback: ${err}`); setPlaying(false); }
+          return;
+        }
+        // ~8 fps target; actual rate limited by render time
+        await new Promise<void>((res) => setTimeout(res, 125));
+      }
+    })();
+
+    return () => { active = false; };
+  }, [playing, activeScene]); // currentFrame intentionally omitted — captured at loop start
 
   const handleOpenFile = useCallback(async () => {
     const selected = await openDialog({
@@ -25,6 +65,8 @@ export function Studio() {
     const path = typeof selected === "string" ? selected : selected[0];
     if (!path) return;
 
+    setPlaying(false);
+    setCurrentFrame(0);
     setStatusMsg("Opening…");
     setFrameDataUrl(null);
     setFrameError(null);
@@ -38,7 +80,6 @@ export function Studio() {
       setActiveScene(0);
       setStatusMsg(`Loaded: ${info.file_name} — ${info.scene_count} scenes, ${info.total_frames} frames`);
 
-      // Load sounds
       try {
         const s = await listSounds();
         setSounds(s);
@@ -46,10 +87,9 @@ export function Studio() {
         setSounds([]);
       }
 
-      // Render demo viewport
       setFrameLoading(true);
       try {
-        const url = await renderDemoFrame(640, 480);
+        const url = await renderSceneFrame(0, 0, 640, 480);
         setFrameDataUrl(url);
         setFrameError(null);
       } catch (err) {
@@ -62,9 +102,46 @@ export function Studio() {
     }
   }, []);
 
-  const handleSelectScene = useCallback((idx: number) => {
+  const handleSelectScene = useCallback(async (idx: number) => {
+    setPlaying(false);
     setActiveScene(idx);
+    setCurrentFrame(0);
+    setFrameLoading(true);
+    setFrameError(null);
+    try {
+      const url = await renderSceneFrame(idx, 0, 640, 480);
+      setFrameDataUrl(url);
+      setFrameError(null);
+    } catch (err) {
+      setFrameDataUrl(null);
+      setFrameError(String(err));
+      setStatusMsg(`Scene ${idx + 1}: ${err}`);
+    } finally {
+      setFrameLoading(false);
+    }
   }, []);
+
+  const handlePlayPause = useCallback(() => {
+    setPlaying((p) => !p);
+  }, []);
+
+  const handleStepFrame = useCallback(async (delta: number) => {
+    if (playing) return;
+    const scene = scenes[activeScene];
+    if (!scene) return;
+    const next = Math.max(0, Math.min(currentFrame + delta, scene.frame_count - 1));
+    setCurrentFrame(next);
+    setFrameLoading(true);
+    try {
+      const url = await renderSceneFrame(activeScene, next, 640, 480);
+      setFrameDataUrl(url);
+      setFrameError(null);
+    } catch (err) {
+      setStatusMsg(`Frame ${next}: ${err}`);
+    } finally {
+      setFrameLoading(false);
+    }
+  }, [playing, activeScene, scenes, currentFrame]);
 
   const handlePlaySound = useCallback(async (cno: number) => {
     try {
@@ -73,6 +150,8 @@ export function Studio() {
       setStatusMsg(`Sound error: ${err}`);
     }
   }, []);
+
+  const activeSceneInfo = scenes[activeScene];
 
   return (
     <div className="studio">
@@ -98,6 +177,38 @@ export function Studio() {
             loading={frameLoading}
             error={frameError}
           />
+          {/* Playback controls overlay */}
+          {movie && (
+            <div className="playback-bar">
+              <button
+                className="playback-btn"
+                onClick={() => handleStepFrame(-1)}
+                disabled={playing || currentFrame <= 0}
+                title="Previous frame"
+              >
+                ◀
+              </button>
+              <button
+                className="playback-btn playback-playpause"
+                onClick={handlePlayPause}
+                disabled={!activeSceneInfo || activeSceneInfo.frame_count <= 1}
+                title={playing ? "Pause" : "Play"}
+              >
+                {playing ? "⏸" : "▶"}
+              </button>
+              <button
+                className="playback-btn"
+                onClick={() => handleStepFrame(1)}
+                disabled={playing || !activeSceneInfo || currentFrame >= activeSceneInfo.frame_count - 1}
+                title="Next frame"
+              >
+                ▶▶
+              </button>
+              <span className="playback-frame">
+                {currentFrame + 1} / {activeSceneInfo?.frame_count ?? 0}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Sidebar: sounds */}

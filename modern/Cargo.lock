@@ -1077,6 +1077,7 @@ dependencies = [
  "base64 0.22.1",
  "chunky-format",
  "engine",
+ "glam",
  "png",
  "renderer",
  "serde",
