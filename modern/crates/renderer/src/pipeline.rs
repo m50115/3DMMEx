@@ -87,7 +87,7 @@ impl RenderPipeline {
                 ],
             });
 
-        // Bind group 1 layout: model + material
+        // Bind group 1 layout: model + material + texture + sampler
         let instance_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("instance_bind_group_layout"),
@@ -110,6 +110,22 @@ impl RenderPipeline {
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
                 ],
@@ -217,6 +233,8 @@ impl RenderPipeline {
         device: &wgpu::Device,
         model_buf: &wgpu::Buffer,
         material_buf: &wgpu::Buffer,
+        texture_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("instance_bind_group"),
@@ -229,6 +247,14 @@ impl RenderPipeline {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: material_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         })

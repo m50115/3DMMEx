@@ -17,5 +17,8 @@ env_logger = { workspace = true }
 
 [dev-dependencies]
 chunky-format = { path = "../chunky-format" }
+engine = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }

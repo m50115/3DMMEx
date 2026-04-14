@@ -38,8 +38,10 @@ struct MaterialUniform {
     specular_power: f32,
 };
 
-@group(1) @binding(0) var<uniform> model_u:    ModelUniform;
-@group(1) @binding(1) var<uniform> material_u: MaterialUniform;
+@group(1) @binding(0) var<uniform> model_u:      ModelUniform;
+@group(1) @binding(1) var<uniform> material_u:  MaterialUniform;
+@group(1) @binding(2) var          tmap_tex:    texture_2d<f32>;
+@group(1) @binding(3) var          tmap_sampler: sampler;
 
 // ---- Vertex stage ----
 
@@ -93,8 +95,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let spec     = pow(NdotH, material_u.specular_power);
     let specular = light.color * light.intensity * material_u.specular * spec;
 
-    let base = material_u.base_color.rgb * in.vert_color.rgb;
+    // Vertex colors on BRender on-disk models are always 0 (filled at runtime by
+    // BRender's CPU rasterizer). Use material base_color × texture only.
+    let tex_color = textureSample(tmap_tex, tmap_sampler, in.uv);
+    let base = material_u.base_color.rgb * tex_color.rgb;
     let lit  = base * (ambient + diffuse) + specular;
 
-    return vec4<f32>(lit, material_u.base_color.a * in.vert_color.a);
+    return vec4<f32>(lit, material_u.base_color.a * tex_color.a);
 }
