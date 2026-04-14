@@ -62,34 +62,31 @@ pub fn open_file(path: String, state: State<AppState>) -> Result<MovieInfo, Stri
     let cfl = ChunkyFile::read(&mut reader)
         .map_err(|e| format!("Parse error: {e}"))?;
 
-    // Infer content_dir from the file location: look for content-files/ sibling.
-    // A .3mm lives in samples/ or projects/ next to content-files/.
-    let parent = pb.parent().and_then(|p| p.parent());
-    if let Some(base) = parent {
-        let candidate = base.join("content-files");
-        if candidate.exists() {
-            *state.content_dir.lock().unwrap() = Some(candidate.clone());
-            // Pre-parse tmpls.3cn once; reused by every render_scene_frame call.
-            let tmpls_path = candidate.join("tmpls.3cn");
-            if let Ok(f) = std::fs::File::open(&tmpls_path) {
-                let mut r = BufReader::new(f);
-                if let Ok(cf) = ChunkyFile::read(&mut r) {
-                    *state.tmpls.lock().unwrap() = Some(Arc::new(cf));
-                }
+    // Find content-files/ by walking up from the movie file, then up from the
+    // executable. Fan movies may live in a completely different directory tree
+    // from the 3DMMEx project, so a simple 2-level heuristic is not enough.
+    if let Some(content_dir) = find_content_dir(&pb) {
+        *state.content_dir.lock().unwrap() = Some(content_dir.clone());
+        // Pre-parse tmpls.3cn once; reused by every render_scene_frame call.
+        let tmpls_path = content_dir.join("tmpls.3cn");
+        if let Ok(f) = std::fs::File::open(&tmpls_path) {
+            let mut r = BufReader::new(f);
+            if let Ok(cf) = ChunkyFile::read(&mut r) {
+                *state.tmpls.lock().unwrap() = Some(Arc::new(cf));
             }
-            // Pre-parse tdfs.3cn — fallback BMDL source for fan-made movies with TDT chunks.
-            let tdfs_path = candidate.join("tdfs.3cn");
-            if let Ok(f) = std::fs::File::open(&tdfs_path) {
-                let mut r = BufReader::new(f);
-                if let Ok(cf) = ChunkyFile::read(&mut r) {
-                    *state.tdfs.lock().unwrap() = Some(Arc::new(cf));
-                }
+        }
+        // Pre-parse tdfs.3cn — fallback BMDL source for fan-made movies with TDT chunks.
+        let tdfs_path = content_dir.join("tdfs.3cn");
+        if let Ok(f) = std::fs::File::open(&tdfs_path) {
+            let mut r = BufReader::new(f);
+            if let Ok(cf) = ChunkyFile::read(&mut r) {
+                *state.tdfs.lock().unwrap() = Some(Arc::new(cf));
             }
-            // Invalidate GPU mesh cache — new file means new geometry.
-            let mut gpu_guard = state.gpu.lock().unwrap();
-            if let Some(ref mut gpu) = *gpu_guard {
-                gpu.clear_mesh_cache();
-            }
+        }
+        // Invalidate GPU mesh cache — new file means new geometry.
+        let mut gpu_guard = state.gpu.lock().unwrap();
+        if let Some(ref mut gpu) = *gpu_guard {
+            gpu.clear_mesh_cache();
         }
     }
 
@@ -928,4 +925,37 @@ fn build_pcm_wav(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
         wav.extend_from_slice(&s.to_le_bytes());
     }
     wav
+}
+
+/// Find the content-files/ directory by walking up the directory tree.
+///
+/// Checks two search roots in order:
+/// 1. Walk up from the .3mm file's location.
+/// 2. Walk up from the current executable's location.
+///
+/// This handles fan movies stored in a directory tree unrelated to the
+/// 3DMMEx project (e.g. /Users/Shared/exports/) — the executable lives
+/// inside the project tree where content-files/ is easily found.
+fn find_content_dir(movie_path: &std::path::Path) -> Option<PathBuf> {
+    // Walk up from the movie file
+    let mut dir = movie_path.parent();
+    while let Some(d) = dir {
+        let candidate = d.join("content-files");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        dir = d.parent();
+    }
+    // Walk up from the executable (works when fan movies are outside the project tree)
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent();
+        while let Some(d) = dir {
+            let candidate = d.join("content-files");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            dir = d.parent();
+        }
+    }
+    None
 }

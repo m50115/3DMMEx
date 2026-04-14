@@ -236,7 +236,7 @@ impl ChunkyFile {
         }
 
         // Read free space map
-        let mut free_map = Vec::new();
+        let free_map = Vec::new();
         if header.cb_map > 0 {
             reader.seek(SeekFrom::Start(header.fp_map as u64))?;
             let mut map_buf = vec![0u8; header.cb_map as usize];
