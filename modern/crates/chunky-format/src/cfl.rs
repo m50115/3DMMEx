@@ -265,7 +265,7 @@ impl ChunkyFile {
             .ok_or(ChunkyError::ChunkNotFound { ctg, cno })?;
 
         if entry.is_packed() {
-            codec::decompress(raw)
+            codec::decompress(raw, entry.cb as usize)
         } else {
             Ok(raw.clone())
         }
