@@ -45,7 +45,8 @@ pub struct Material {
     pub prelit: bool,
     /// If `true`, render both sides of faces.
     pub two_sided: bool,
-    // TODO Phase 3+: texture_id for TMAP lookup
+    /// Index into `RenderWorld::textures`, if a TMAP is bound to this material.
+    pub texture_idx: Option<usize>,
 }
 
 impl Default for Material {
@@ -54,6 +55,16 @@ impl Default for Material {
             gpu: GpuMaterial::default(),
             prelit: false,
             two_sided: false,
+            texture_idx: None,
         }
     }
+}
+
+/// An uploaded TMAP pixelmap ready for binding to a shader.
+///
+/// Created by `convert::tmap_to_texture()`.
+pub struct GpuTexture {
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub sampler: wgpu::Sampler,
 }

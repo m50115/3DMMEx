@@ -14,7 +14,7 @@ use glam;
 
 use crate::camera::Camera;
 use crate::lighting::GpuLight;
-use crate::material::{GpuMaterial, Material};
+use crate::material::{GpuMaterial, GpuTexture, Material};
 use crate::vertex::{GpuVertex, Mesh};
 
 /// Convert a BRender fixed-point scalar to f32.
@@ -75,6 +75,7 @@ pub fn material_to_gpu(mat: &BrMaterial) -> Material {
         },
         prelit: false,    // MTRLF has no flags field; use default
         two_sided: false,
+        texture_idx: None,
     }
 }
 
@@ -259,6 +260,66 @@ pub fn tmap_to_rgba(tmap: &BrTmap) -> (u32, u32, Vec<u8>) {
     }
 
     (width as u32, height as u32, out)
+}
+
+/// Upload a parsed [`BrTmap`] to the GPU as a 2-D RGBA8 texture.
+///
+/// Internally calls [`tmap_to_rgba`] to produce the pixel buffer, then
+/// creates a `wgpu::TextureFormat::Rgba8UnormSrgb` texture and writes the
+/// data with `queue.write_texture`.
+///
+/// Returns a [`GpuTexture`] containing the texture, a default view, and a
+/// bilinear clamp-to-edge sampler.
+pub fn tmap_to_texture(
+    tmap: &BrTmap,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> GpuTexture {
+    let (width, height, rgba) = tmap_to_rgba(tmap);
+
+    let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("tmap_texture"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("tmap_sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+
+    GpuTexture { texture, view, sampler }
 }
 
 /// Convert a parsed BRender [`Model`] into a renderable [`Mesh`].

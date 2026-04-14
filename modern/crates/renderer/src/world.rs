@@ -7,7 +7,7 @@ use glam::Mat4;
 
 use crate::camera::Camera;
 use crate::lighting::GpuLight;
-use crate::material::Material;
+use crate::material::{GpuTexture, Material};
 use crate::vertex::Mesh;
 
 /// A positioned instance of a mesh in the world.
@@ -27,6 +27,8 @@ pub struct MeshInstance {
 pub struct RenderWorld {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>,
+    /// Uploaded TMAP textures. `Material::texture_idx` indexes into this.
+    pub textures: Vec<GpuTexture>,
     pub instances: Vec<MeshInstance>,
     pub camera: Camera,
     pub light: GpuLight,
@@ -39,6 +41,7 @@ impl RenderWorld {
         Self {
             meshes: Vec::new(),
             materials: Vec::new(),
+            textures: Vec::new(),
             instances: Vec::new(),
             camera: Camera::default(),
             light: GpuLight::default(),
