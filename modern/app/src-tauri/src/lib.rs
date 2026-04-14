@@ -18,6 +18,9 @@ pub fn run() {
             commands::render_scene_frame,
             commands::list_sounds,
             commands::play_sound,
+            commands::get_scene_actors,
+            commands::update_actor_position,
+            commands::save_file,
         ])
         .run(tauri::generate_context!())
         .expect("error running 3DMMEx application");

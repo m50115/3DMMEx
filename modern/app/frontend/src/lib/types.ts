@@ -17,3 +17,13 @@ export interface SoundEntry {
   sound_type: string;
   volume_default: number;
 }
+
+export interface ActorInfo {
+  actor_idx: number;
+  cno: number;
+  dx: number;
+  dy: number;
+  dz: number;
+  nfrm_first: number;
+  nfrm_last: number;
+}

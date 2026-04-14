@@ -483,6 +483,146 @@ pub fn play_sound(cno: u32, state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+// ── Phase 7a — Editor commands ────────────────────────────────────────────
+
+/// Actor metadata returned to the frontend editor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorInfo {
+    /// Scene-local index (position in SCEN's ACTR children list)
+    pub actor_idx: usize,
+    /// Chunk number in the .3mm file
+    pub cno: u32,
+    /// Position offset X (world-space, float)
+    pub dx: f32,
+    /// Position offset Y (world-space, float)
+    pub dy: f32,
+    /// Position offset Z (world-space, float)
+    pub dz: f32,
+    pub nfrm_first: i32,
+    pub nfrm_last: i32,
+}
+
+/// Return the list of actors in a scene with their current positions.
+#[tauri::command]
+pub fn get_scene_actors(
+    scene_idx: usize,
+    state: State<AppState>,
+) -> Result<Vec<ActorInfo>, String> {
+    let guard = state.loaded_file.lock().unwrap();
+    let lf = guard.as_ref().ok_or("No file loaded")?;
+
+    let scen = lf.cfl.chunks.iter()
+        .filter(|c| c.id.ctg == CTG_SCEN)
+        .nth(scene_idx)
+        .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
+
+    let mut actors = Vec::new();
+    for (idx, child) in scen.children.iter().filter(|c| c.id.ctg == CTG_ACTR).enumerate() {
+        let cno = child.id.cno;
+        let raw = match lf.cfl.chunk_data.get(&(CTG_ACTR, cno)) {
+            Some(d) => d,
+            None => continue,
+        };
+        if raw.len() < ActorOnFile::SIZE { continue; }
+
+        let arr: [u8; 44] = raw[..44].try_into().unwrap();
+        let actor = match ActorOnFile::from_bytes(&arr) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+
+        // BRS 16.16 → f32
+        let dx = actor.dxyz_full_rte.x.0 as f32 / 65536.0;
+        let dy = actor.dxyz_full_rte.y.0 as f32 / 65536.0;
+        let dz = actor.dxyz_full_rte.z.0 as f32 / 65536.0;
+
+        actors.push(ActorInfo {
+            actor_idx: idx,
+            cno,
+            dx,
+            dy,
+            dz,
+            nfrm_first: actor.nfrm_first,
+            nfrm_last: actor.nfrm_last,
+        });
+    }
+
+    Ok(actors)
+}
+
+/// Edit an actor's position offset (dxyz_full_rte) in memory.
+///
+/// Changes are reflected immediately in subsequent stream:// renders.
+/// Call `save_file` to persist to disk.
+#[tauri::command]
+pub fn update_actor_position(
+    scene_idx: usize,
+    actor_idx: usize,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let mut guard = state.loaded_file.lock().unwrap();
+    let lf = guard.as_mut().ok_or("No file loaded")?;
+
+    // Resolve (scene_idx, actor_idx) → ACTR cno
+    let actr_cno = {
+        let scen = lf.cfl.chunks.iter()
+            .filter(|c| c.id.ctg == CTG_SCEN)
+            .nth(scene_idx)
+            .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
+        scen.children.iter()
+            .filter(|c| c.id.ctg == CTG_ACTR)
+            .nth(actor_idx)
+            .ok_or_else(|| format!("Actor {actor_idx} not found in scene {scene_idx}"))?
+            .id.cno
+    };
+
+    let raw = lf.cfl.chunk_data
+        .get(&(CTG_ACTR, actr_cno))
+        .ok_or_else(|| format!("ACTR chunk cno={actr_cno} not in chunk_data"))?
+        .clone();
+
+    if raw.len() < ActorOnFile::SIZE {
+        return Err(format!("ACTR chunk cno={actr_cno} too small: {} bytes", raw.len()));
+    }
+
+    // Write dxyz_full_rte directly as BRS 16.16 fixed-point i32 at offsets 4-15
+    let mut new_raw = raw;
+    let x_fixed = (dx * 65536.0) as i32;
+    let y_fixed = (dy * 65536.0) as i32;
+    let z_fixed = (dz * 65536.0) as i32;
+    new_raw[4..8].copy_from_slice(&x_fixed.to_le_bytes());
+    new_raw[8..12].copy_from_slice(&y_fixed.to_le_bytes());
+    new_raw[12..16].copy_from_slice(&z_fixed.to_le_bytes());
+
+    lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), new_raw);
+    Ok(())
+}
+
+/// Serialize the loaded file to disk (overwrite original path, or a new path).
+///
+/// Returns the path that was written.
+#[tauri::command]
+pub fn save_file(path: Option<String>, state: State<AppState>) -> Result<String, String> {
+    let guard = state.loaded_file.lock().unwrap();
+    let lf = guard.as_ref().ok_or("No file loaded")?;
+
+    let save_path = match &path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => lf.path.clone(),
+    };
+
+    let bytes = lf.cfl.to_bytes_passthrough()
+        .map_err(|e| format!("Serialize error: {e}"))?;
+
+    std::fs::write(&save_path, &bytes)
+        .map_err(|e| format!("Write failed: {e}"))?;
+
+    Ok(save_path.to_string_lossy().into_owned())
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /// Encode raw RGBA8 pixels to 24-bit BMP bytes (no compression).
