@@ -17,7 +17,25 @@
       "Bash(awk '{sum += $1} END {print \"Total:\", sum}')",
       "Bash(cargo tauri:*)",
       "Bash(cargo search:*)",
-      "Bash(python3 -c ':*)"
+      "Bash(python3 -c ':*)",
+      "Bash(git -C /Users/devuser/www/3DMMEx/modern log --oneline -8)",
+      "Bash(git -C /Users/devuser/www/3DMMEx/modern status)",
+      "Bash(git config:*)",
+      "Bash(chmod 777 /tmp/3dmmex-build)",
+      "Read(//private/tmp/3dmmex-build/**)",
+      "Bash(CARGO_TARGET_DIR=/tmp/3dmmex-build-dev cargo run -p cli -- inspect /Users/devuser/www/3DMMEx/samples/bongo.3mm)",
+      "Bash(CARGO_TARGET_DIR=/tmp/3dmmex-build-dev cargo run -p cli -- inspect /Users/devuser/www/3DMMEx/content-files/tmpls.3cn)",
+      "Bash(CARGO_TARGET_DIR=/tmp/3dmmex-build-dev cargo run -p cli -- inspect /Users/devuser/www/3DMMEx/samples/jungle.3mm)",
+      "Bash(CARGO_TARGET_DIR=/tmp/3dmmex-build-dev cargo test -p engine --test dump_actor_tags -- --nocapture)",
+      "Bash(grep -v \"^warning\\\\|^   Compiling\\\\|^    Checking\\\\|^    Finished\\\\|^running\\\\|^error\\\\[E\\\\|^ -->\\\\|^  |\\\\|^   =\\\\|^$\")",
+      "Bash(CARGO_TARGET_DIR=/tmp/3dmmex-build-dev cargo check -p dmmex-app)",
+      "Bash(CARGO_TARGET_DIR=/tmp/3dmmex-build-dev cargo check:*)",
+      "Bash(npx tsc:*)",
+      "Bash(CARGO_TARGET_DIR=/tmp/3dmmex-build-dev cargo test -p engine --test dump_frame_ranges -- --nocapture)",
+      "Bash(CARGO_TARGET_DIR=/Users/devuser/www/assets/3dmmex-build cargo build -p dmmex-app)",
+      "Bash(CARGO_TARGET_DIR=/Users/devuser/www/assets/3dmmex-build cargo build -p renderer)",
+      "Bash(CARGO_TARGET_DIR=/Users/devuser/www/assets/3dmmex-build cargo test -p renderer)",
+      "Bash(CARGO_TARGET_DIR=/Users/devuser/www/assets/3dmmex-build cargo test --workspace)"
     ]
   }
 }
