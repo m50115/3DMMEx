@@ -1,0 +1,14 @@
+/Users/devuser/www/3DMMEx/modern/target/debug/deps/midly-7a352f5683b463b6.d: /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/lib.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/error.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/arena.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/event.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/io.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/live.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/primitive.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/riff.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/smf.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/stream.rs
+
+/Users/devuser/www/3DMMEx/modern/target/debug/deps/libmidly-7a352f5683b463b6.rmeta: /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/lib.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/error.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/arena.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/event.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/io.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/live.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/primitive.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/riff.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/smf.rs /Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/stream.rs
+
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/lib.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/error.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/arena.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/event.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/io.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/live.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/primitive.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/riff.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/smf.rs:
+/Users/devuser/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/midly-0.5.3/src/stream.rs:

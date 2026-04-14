@@ -10,6 +10,7 @@
 
 pub mod camera;
 pub mod convert;
+pub mod headless;
 pub mod lighting;
 pub mod material;
 pub mod pipeline;

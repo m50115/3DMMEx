@@ -14,7 +14,10 @@
       "Bash(awk -F'[. ]' '{sum+=$5} END {print \"Total tests passed:\", sum}')",
       "Bash(cargo build:*)",
       "Bash(awk -F'[. ;]' '{sum += $3} END {print \"Total tests:\", sum}')",
-      "Bash(awk '{sum += $1} END {print \"Total:\", sum}')"
+      "Bash(awk '{sum += $1} END {print \"Total:\", sum}')",
+      "Bash(cargo tauri:*)",
+      "Bash(cargo search:*)",
+      "Bash(python3 -c ':*)"
     ]
   }
 }

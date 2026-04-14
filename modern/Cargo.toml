@@ -6,6 +6,7 @@ members = [
     "crates/renderer",
     "crates/audio",
     "crates/cli",
+    "app/src-tauri",
 ]
 
 [workspace.package]
@@ -36,6 +37,16 @@ glam = "0.29"
 rodio = { version = "0.20", default-features = false, features = ["wav"] }
 hound = "3"
 midly = { version = "0.5", features = ["std"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# PNG encoding (headless render → frontend)
+png = "0.17"
+
+# Base64 (PNG → data URL)
+base64 = "0.22"
 
 # Testing
 pretty_assertions = "1"

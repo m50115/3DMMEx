@@ -1,0 +1,233 @@
+/* 3DMMEx — Studio layout */
+
+:root {
+  --bg: #1a1a2e;
+  --bg2: #16213e;
+  --bg3: #0f3460;
+  --accent: #e94560;
+  --text: #e0e0e0;
+  --text-dim: #888;
+  --border: #333;
+  --toolbar-h: 48px;
+  --statusbar-h: 24px;
+  --timeline-h: 64px;
+  --sidebar-w: 220px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+/* Studio grid */
+.studio {
+  display: grid;
+  grid-template-rows: var(--toolbar-h) 1fr var(--timeline-h) var(--statusbar-h);
+  height: 100vh;
+}
+
+/* Toolbar */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+}
+
+.toolbar-title {
+  font-weight: bold;
+  font-size: 15px;
+  color: var(--accent);
+  letter-spacing: 0.05em;
+}
+
+.toolbar-info {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.btn-primary {
+  padding: 6px 14px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-primary:hover { opacity: 0.85; }
+
+/* Main area */
+.main-area {
+  display: flex;
+  overflow: hidden;
+}
+
+/* Viewport panel */
+.viewport-panel {
+  flex: 1;
+  display: flex;
+  background: #000;
+  overflow: hidden;
+}
+
+.viewport {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0a0a0f;
+}
+
+.viewport-frame {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.viewport-overlay {
+  position: absolute;
+  color: var(--text-dim);
+  font-size: 14px;
+  text-align: center;
+}
+
+.viewport-overlay.error { color: var(--accent); }
+.viewport-overlay.hint { color: var(--text-dim); }
+
+/* Sidebar */
+.sidebar {
+  width: var(--sidebar-w);
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-title {
+  padding: 8px 12px;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.sound-list {
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.sound-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #222;
+}
+
+.sound-item:hover { background: #1e1e2e; }
+
+.sound-play {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 10px;
+}
+
+.sound-play:hover { border-color: var(--accent); color: var(--accent); }
+
+.sound-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.sound-type {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Timeline */
+.timeline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.timeline.empty {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.timeline-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.timeline-scenes {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.scene-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 44px;
+  padding: 4px 6px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+  gap: 2px;
+}
+
+.scene-btn:hover { border-color: var(--accent); }
+.scene-btn.active { border-color: var(--accent); background: #1a1a3e; }
+
+.scene-num { font-weight: bold; }
+.scene-frames { color: var(--text-dim); font-size: 10px; }
+
+/* Status bar */
+.statusbar {
+  padding: 0 12px;
+  line-height: var(--statusbar-h);
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

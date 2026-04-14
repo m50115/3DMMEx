@@ -1,0 +1,27 @@
+[package]
+name = "dmmex-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "dmmex_app"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+png = { workspace = true }
+
+chunky-format = { workspace = true }
+engine = { workspace = true }
+renderer = { workspace = true }
+audio = { workspace = true }
