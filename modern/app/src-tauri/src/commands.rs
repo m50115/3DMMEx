@@ -19,7 +19,7 @@ use engine::events::{ActorEvent, EventPayload, OrientPayload, aet};
 use engine::fixedpoint::FixedAngle;
 use engine::model::Model;
 use engine::msnd::MovieSound;
-use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MSND, CTG_PATH, CTG_SCEN, CTG_TDT, CTG_TDFS, CTG_TMPL, CTG_WAVE};
+use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MSND, CTG_PATH, CTG_SCEN, CTG_TDT, CTG_TMPL, CTG_WAVE};
 use engine::transform::RoutePoint;
 use renderer::convert::orient_to_rotation_mat4;
 
@@ -199,10 +199,10 @@ pub(crate) fn render_to_rgba(
     height: u32,
 ) -> Result<Vec<u8>, String> {
     // --- Step 1: locate SCEN chunk and extract actor tag_tmpls + transforms --
-    // Each entry: (ctg, cno, transform, tdt_bmdl_cno)
-    // tdt_bmdl_cno is Some(bmdl_cno) when the actor uses a local .3mm TMPL with a TDT child
+    // Each entry: (ctg, cno, transform, is_tdt)
+    // is_tdt = true when local .3mm TMPL has a TDT child (fan-movie 3D text actor)
     // pointing to a BMDL in tdfs.3cn (fan-made movie path).
-    let tag_tmpls: Vec<(u32, u32, glam::Mat4, Option<u32>)> = {
+    let tag_tmpls: Vec<(u32, u32, glam::Mat4, bool)> = {
         let guard = state.loaded_file.lock().unwrap();
         let lf = guard.as_ref().ok_or("No file loaded")?;
 
@@ -295,23 +295,21 @@ pub(crate) fn render_to_rgba(
                     glam::Mat4::IDENTITY
                 };
 
-                // For fan-made movies: resolve local TMPL → TDT → tdfs BMDL cno while
-                // we still hold the loaded_file lock.
-                let tdt_bmdl_cno: Option<u32> = if actf.tag_tmpl.ctg == CTG_TMPL {
+                // Detect TDT (3D text) actors — skip with diagnostic (Phase 7d pending).
+                let is_tdt = if actf.tag_tmpl.ctg == CTG_TMPL {
                     let tmpl_local = lf.cfl.chunks.iter()
                         .find(|c| c.id.ctg == CTG_TMPL && c.id.cno == actf.tag_tmpl.cno);
-                    tmpl_local.and_then(|tmpl| {
-                        let tdt_child = tmpl.children.iter().find(|ch| ch.id.ctg == CTG_TDT)?;
-                        let tdt_data = lf.cfl.get_chunk_data(tdt_child.id.ctg, tdt_child.id.cno).ok()?;
-                        if tdt_data.len() < 24 { return None; }
-                        let file_ctg = u32::from_le_bytes(tdt_data[16..20].try_into().ok()?);
-                        let bmdl_cno = u32::from_le_bytes(tdt_data[20..24].try_into().ok()?);
-                        if file_ctg == CTG_TDFS { Some(bmdl_cno) } else { None }
+                    tmpl_local.map_or(false, |tmpl| {
+                        tmpl.children.iter().any(|ch| ch.id.ctg == CTG_TDT)
                     })
                 } else {
-                    None
+                    false
                 };
-                tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, translation * rotation, tdt_bmdl_cno));
+                if is_tdt {
+                    tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, translation * rotation, true));
+                } else {
+                    tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, translation * rotation, false));
+                }
             }
         }
         tags
@@ -333,7 +331,11 @@ pub(crate) fn render_to_rgba(
     let mut scene_entries: Vec<((u32, u32), glam::Mat4)> = Vec::new();
     let mut diag: Vec<String> = Vec::new();
 
-    for &(ctg, cno, transform, tdt_bmdl_cno) in &tag_tmpls {
+    for &(ctg, cno, transform, is_tdt) in &tag_tmpls {
+        if is_tdt {
+            diag.push(format!("TMPL:{cno} is TDT (3D text) — skipped (Phase 7d pending)"));
+            continue;
+        }
         if ctg == CTG_TMPL {
             // --- primary path: look up TMPL in tmpls.3cn ---
             let tmpl_opt = tmpls.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == cno);
@@ -369,30 +371,7 @@ pub(crate) fn render_to_rgba(
                 continue;
             }
 
-            // --- fallback: fan-made movie — TDT resolved in Step 1 to tdfs.3cn BMDL ---
-            if let Some(bmdl_cno) = tdt_bmdl_cno {
-                if let Some(ref tdfs_cfl) = tdfs {
-                    let bmdl_key = (CTG_BMDL, bmdl_cno);
-                    if !gpu.has_mesh(bmdl_key) {
-                        if let Ok(data) = tdfs_cfl.get_chunk_data(CTG_BMDL, bmdl_cno) {
-                            if data.len() >= 80 {
-                                if let Ok(m) = Model::from_bytes(&data) {
-                                    gpu.ensure_mesh(bmdl_key, &m);
-                                }
-                            }
-                        }
-                    }
-                    if gpu.has_mesh(bmdl_key) {
-                        scene_entries.push((bmdl_key, transform));
-                    } else {
-                        diag.push(format!("TMPL:{cno} → tdfs BMDL:{bmdl_cno} not renderable"));
-                    }
-                } else {
-                    diag.push(format!("TMPL:{cno} needs tdfs.3cn (not loaded)"));
-                }
-            } else {
-                diag.push(format!("TMPL:{cno} not in tmpls.3cn and no TDT fallback"));
-            }
+            diag.push(format!("TMPL:{cno} not found in tmpls.3cn"));
         } else if ctg == CTG_BMDL {
             let bmdl_key = (CTG_BMDL, cno);
             if !gpu.has_mesh(bmdl_key) {
@@ -411,7 +390,7 @@ pub(crate) fn render_to_rgba(
             }
         } else {
             let ctg_str: String = ctg.to_be_bytes().iter()
-                .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
+                .map(|&b: &u8| if b.is_ascii_graphic() { b as char } else { '.' })
                 .collect();
             diag.push(format!("actor ctg='{}' cno={cno} — not TMPL/BMDL", ctg_str));
         }
