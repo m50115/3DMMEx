@@ -19,7 +19,8 @@ use engine::events::{ActorEvent, EventPayload, OrientPayload, aet};
 use engine::fixedpoint::FixedAngle;
 use engine::model::Model;
 use engine::msnd::MovieSound;
-use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MSND, CTG_PATH, CTG_SCEN, CTG_TDT, CTG_TMPL, CTG_WAVE};
+use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MSND, CTG_PATH, CTG_SCEN, CTG_TDF, CTG_TDT, CTG_TMPL, CTG_WAVE};
+use engine::tdt::BrTdt;
 use engine::transform::RoutePoint;
 use renderer::convert::orient_to_rotation_mat4;
 
@@ -199,10 +200,10 @@ pub(crate) fn render_to_rgba(
     height: u32,
 ) -> Result<Vec<u8>, String> {
     // --- Step 1: locate SCEN chunk and extract actor tag_tmpls + transforms --
-    // Each entry: (ctg, cno, transform, is_tdt)
-    // is_tdt = true when local .3mm TMPL has a TDT child (fan-movie 3D text actor)
-    // pointing to a BMDL in tdfs.3cn (fan-made movie path).
-    let tag_tmpls: Vec<(u32, u32, glam::Mat4, bool)> = {
+    // Each entry: (ctg, cno, transform, tdt_data)
+    // tdt_data = Some((tdf_cno, stn)) for TDT actors; None for normal actors.
+    // Extracted while holding the loaded_file lock so Step 2 needs no re-lock.
+    let tag_tmpls: Vec<(u32, u32, glam::Mat4, Option<(u32, String)>)> = {
         let guard = state.loaded_file.lock().unwrap();
         let lf = guard.as_ref().ok_or("No file loaded")?;
 
@@ -295,21 +296,23 @@ pub(crate) fn render_to_rgba(
                     glam::Mat4::IDENTITY
                 };
 
-                // Detect TDT (3D text) actors — skip with diagnostic (Phase 7d pending).
-                let is_tdt = if actf.tag_tmpl.ctg == CTG_TMPL {
+                // For TDT (3D text) actors: extract (tdf_cno, stn) while we hold
+                // the loaded_file lock so Step 2 can use them without re-locking.
+                let tdt_data: Option<(u32, String)> = if actf.tag_tmpl.ctg == CTG_TMPL {
                     let tmpl_local = lf.cfl.chunks.iter()
                         .find(|c| c.id.ctg == CTG_TMPL && c.id.cno == actf.tag_tmpl.cno);
-                    tmpl_local.map_or(false, |tmpl| {
-                        tmpl.children.iter().any(|ch| ch.id.ctg == CTG_TDT)
+                    tmpl_local.and_then(|tmpl| {
+                        let tdt_child = tmpl.children.iter().find(|ch| ch.id.ctg == CTG_TDT)?;
+                        let tdt_bytes = lf.cfl.get_chunk_data(CTG_TDT, tdt_child.id.cno).ok()?;
+                        let tdt = BrTdt::from_bytes(&tdt_bytes).ok()?;
+                        let stn = tmpl.name.clone().unwrap_or_default();
+                        if stn.is_empty() { return None; }
+                        Some((tdt.tag_tdf.cno, stn))
                     })
                 } else {
-                    false
+                    None
                 };
-                if is_tdt {
-                    tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, translation * rotation, true));
-                } else {
-                    tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, translation * rotation, false));
-                }
+                tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, translation * rotation, tdt_data));
             }
         }
         tags
@@ -331,11 +334,65 @@ pub(crate) fn render_to_rgba(
     let mut scene_entries: Vec<((u32, u32), glam::Mat4)> = Vec::new();
     let mut diag: Vec<String> = Vec::new();
 
-    for &(ctg, cno, transform, is_tdt) in &tag_tmpls {
-        if is_tdt {
-            diag.push(format!("TMPL:{cno} is TDT (3D text) — skipped (Phase 7d pending)"));
-            continue;
+    for (ctg, cno, transform, tdt_data) in &tag_tmpls {
+        let (ctg, cno, transform) = (*ctg, *cno, *transform);
+
+        // --- TDT (3D text) path — fan-movie actors with per-char glyph BMDLs ---
+        if let Some((tdf_cno, stn)) = tdt_data {
+            let tdf_cno = *tdf_cno;
+            match &tdfs {
+                None => {
+                    diag.push(format!("TMPL:{cno} is TDT but tdfs.3cn not loaded"));
+                    continue;
+                }
+                Some(tdfs_cfl) => {
+                    // Find TDF font chunk in tdfs.3cn
+                    let tdf_chunk = match tdfs_cfl.chunks.iter()
+                        .find(|c| c.id.ctg == CTG_TDF && c.id.cno == tdf_cno)
+                    {
+                        Some(c) => c,
+                        None => {
+                            diag.push(format!("TMPL:{cno} TDF:{tdf_cno} not found in tdfs.3cn"));
+                            continue;
+                        }
+                    };
+
+                    // M4: render only the first character
+                    let first_char = stn.as_bytes()[0];
+                    let glyph_child = match tdf_chunk.children.iter()
+                        .find(|ch| ch.id.ctg == CTG_BMDL && ch.chid == first_char as u32)
+                    {
+                        Some(c) => c,
+                        None => {
+                            diag.push(format!(
+                                "TMPL:{cno} glyph '{}' (0x{first_char:02x}) missing in TDF:{tdf_cno}",
+                                first_char as char
+                            ));
+                            continue;
+                        }
+                    };
+
+                    let bmdl_key = (CTG_BMDL, glyph_child.id.cno);
+                    if !gpu.has_mesh(bmdl_key) {
+                        if let Ok(data) = tdfs_cfl.get_chunk_data(CTG_BMDL, glyph_child.id.cno) {
+                            if let Ok(m) = Model::from_bytes(&data) {
+                                gpu.ensure_mesh(bmdl_key, &m);
+                            }
+                        }
+                    }
+                    if gpu.has_mesh(bmdl_key) {
+                        scene_entries.push((bmdl_key, transform));
+                    } else {
+                        diag.push(format!(
+                            "TMPL:{cno} glyph '{}' BMDL:{} not renderable",
+                            first_char as char, glyph_child.id.cno
+                        ));
+                    }
+                    continue;
+                }
+            }
         }
+
         if ctg == CTG_TMPL {
             // --- primary path: look up TMPL in tmpls.3cn ---
             let tmpl_opt = tmpls.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == cno);
