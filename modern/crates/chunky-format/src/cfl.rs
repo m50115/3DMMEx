@@ -1,6 +1,52 @@
 //! CFL — Chunky File reader/writer.
 //!
-//! Implements reading and writing of the CHN2 chunky file format.
+//! # CHN2 File Layout
+//!
+//! ```text
+//! [0]   CFP header        128 bytes  — magic, creator, version, byte-order, fp_index, cb_index, fp_map, cb_map
+//! [128] chunk data ...    variable   — raw chunk bytes at their fp offsets (may be KCD2-compressed; flag = PACKED)
+//! [fp_index] GGF index   cb_index   — GG in file-index format (GGF, 20-byte header variant)
+//! [fp_map]  FSM (opt.)   cb_map     — Free Space Map as GL of 8-byte {fp,cb} entries
+//! ```
+//!
+//! # GGF Index On-Disk Layout
+//!
+//! The chunk index is stored as a GGF (General Group, file variant).
+//! Layout confirmed from Kauai `groups.cpp CbOnFile()`:
+//!
+//! ```text
+//! [GGF header:  20 bytes]   bo(u16) + osk(u16) + ilocMac(u32) + bvMac(u32) + clocFree(u32) + cbFixed(u32)
+//! [data buffer: bvMac bytes]  fixed+variable data for ALL elements at LOC[i].bv offsets (GG-allocator-scattered)
+//! [LOC table:   ilocMac×8]  {bv:u32, cb:u32} per element — points into data buffer
+//! ```
+//!
+//! CbOnFile = 20 + bvMac + ilocMac*8.
+//!
+//! Element i: fixed bytes = `data_buf[LOC[i].bv .. LOC[i].bv+cbFixed]`
+//!            variable bytes = `data_buf[LOC[i].bv+cbFixed .. LOC[i].bv+LOC[i].cb]`
+//!
+//! NOTE: This is NOT the same as `collections::GenericGroup` which uses a different 12-byte header
+//! layout (fixed-sequential then LOC then variable). GGF is the file-index-specific format.
+//!
+//! # CRPSM Fixed Entry (20 bytes, version ≥ 4)
+//!
+//! ```text
+//! [ctg:u32][cno:u32][fp:u32][lu:u32][ckid:u16][ccrp_ref:u16]
+//! ```
+//! lu = (cb << 8) | (flags & 0xFF)  — packs chunk size and flags.
+//!
+//! # Variable Entry (after fixed, within LOC[i].cb)
+//!
+//! ```text
+//! ckid × 12 bytes  — KID children: [ctg:u32][cno:u32][chid:u32]
+//! optional STN name: [osk:u16][cch:u8][chars:cch bytes][null:1]
+//! ```
+//!
+//! # Per-Chunk Compression
+//!
+//! Flag `PACKED` (0x04) in chunk flags → data is KCD2-compressed.
+//! Each chunk independently compressed. Writing uncompressed is valid (3DMM reads both).
+//! fp_index, fp_map, fp_mac are byte offsets from file start.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -223,6 +269,143 @@ impl ChunkyFile {
         } else {
             Ok(raw.clone())
         }
+    }
+
+    /// Serialize the entire file to bytes without modifying any chunk data.
+    ///
+    /// Chunks are written sequentially starting at offset 128 (after header).
+    /// The GGF index is rebuilt with updated fp values.
+    /// Compressed chunks are preserved verbatim (PACKED flag stays set).
+    /// This is the foundation for the Phase 7 editor write path.
+    pub fn to_bytes_passthrough(&self) -> Result<Vec<u8>> {
+        let mut out: Vec<u8> = Vec::new();
+
+        // ── 1. Placeholder header (128 bytes) ──────────────────────────────
+        out.resize(HEADER_SIZE, 0u8);
+
+        // ── 2. Write chunks sequentially; record new file positions ────────
+        let mut new_fp: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+        for entry in &self.chunks {
+            if entry.cb == 0 {
+                new_fp.insert((entry.id.ctg, entry.id.cno), 0);
+                continue;
+            }
+            let data = self.chunk_data
+                .get(&(entry.id.ctg, entry.id.cno))
+                .ok_or(ChunkyError::ChunkNotFound { ctg: entry.id.ctg, cno: entry.id.cno })?;
+            let fp = out.len() as u32;
+            new_fp.insert((entry.id.ctg, entry.id.cno), fp);
+            out.extend_from_slice(data);
+        }
+
+        // ── 3. Build and write GGF index ────────────────────────────────────
+        let fp_index = out.len() as u32;
+        let use_small = self.header.uses_small_index();
+        let ggf_bytes = Self::write_ggf_index(&self.chunks, &new_fp, self.header.byte_order, self.header.os_kind, use_small)?;
+        let cb_index = ggf_bytes.len() as u32;
+        out.extend_from_slice(&ggf_bytes);
+
+        // ── 4. No free-space map (FSM) in passthrough ───────────────────────
+        let fp_mac = out.len() as u32;
+
+        // ── 5. Patch header ─────────────────────────────────────────────────
+        let mut hdr = self.header.clone();
+        hdr.fp_mac   = fp_mac;
+        hdr.fp_index = fp_index;
+        hdr.cb_index = cb_index;
+        hdr.fp_map   = 0;
+        hdr.cb_map   = 0;
+        let mut hdr_buf = Vec::with_capacity(HEADER_SIZE);
+        hdr.write(&mut hdr_buf)?;
+        out[..HEADER_SIZE].copy_from_slice(&hdr_buf);
+
+        Ok(out)
+    }
+
+    /// Rebuild a GGF (file-index format) from parsed ChunkEntry slice.
+    ///
+    /// Layout written:
+    /// ```text
+    /// [GGF header: 20]  bo+osk+ilocMac+bvMac+clocFree+cbFixed
+    /// [data buffer]     each element at sequential bv offsets (fixed + variable)
+    /// [LOC table]       ilocMac × {bv:u32, cb:u32}
+    /// ```
+    fn write_ggf_index(
+        chunks: &[ChunkEntry],
+        new_fp: &std::collections::HashMap<(u32, u32), u32>,
+        bo: u16,
+        osk: u16,
+        use_small: bool,
+    ) -> Result<Vec<u8>> {
+        let cb_fixed: u32 = if use_small { ChunkEntry::SIZE_SMALL as u32 } else { ChunkEntry::SIZE_BIG as u32 };
+        let iloc_mac = chunks.len() as u32;
+
+        // Build data buffer sequentially
+        let mut data_buf: Vec<u8> = Vec::new();
+        let mut locs: Vec<(u32, u32)> = Vec::with_capacity(chunks.len());
+
+        for entry in chunks {
+            let bv = data_buf.len() as u32;
+
+            // Fixed portion
+            let fp_val = *new_fp.get(&(entry.id.ctg, entry.id.cno)).unwrap_or(&entry.fp);
+            if use_small {
+                let lu = (entry.cb << 8) | (entry.flags.bits() & 0xFF);
+                data_buf.extend_from_slice(&entry.id.ctg.to_le_bytes());
+                data_buf.extend_from_slice(&entry.id.cno.to_le_bytes());
+                data_buf.extend_from_slice(&fp_val.to_le_bytes());
+                data_buf.extend_from_slice(&lu.to_le_bytes());
+                data_buf.extend_from_slice(&(entry.child_count as u16).to_le_bytes());
+                data_buf.extend_from_slice(&(entry.ref_count as u16).to_le_bytes());
+            } else {
+                data_buf.extend_from_slice(&entry.id.ctg.to_le_bytes());
+                data_buf.extend_from_slice(&entry.id.cno.to_le_bytes());
+                data_buf.extend_from_slice(&fp_val.to_le_bytes());
+                data_buf.extend_from_slice(&entry.cb.to_le_bytes());
+                data_buf.extend_from_slice(&entry.child_count.to_le_bytes());
+                data_buf.extend_from_slice(&entry.ref_count.to_le_bytes());
+                data_buf.extend_from_slice(&entry.rti.to_le_bytes());
+                data_buf.extend_from_slice(&entry.flags.bits().to_le_bytes());
+            }
+
+            // Variable portion: children
+            for child in &entry.children {
+                data_buf.extend_from_slice(&child.id.ctg.to_le_bytes());
+                data_buf.extend_from_slice(&child.id.cno.to_le_bytes());
+                data_buf.extend_from_slice(&child.chid.to_le_bytes());
+            }
+            // Optional name (STN)
+            if let Some(name) = &entry.name {
+                data_buf.extend_from_slice(&osk.to_le_bytes());
+                data_buf.push(name.len() as u8);
+                data_buf.extend_from_slice(name.as_bytes());
+                data_buf.push(0u8); // null terminator
+            }
+
+            let cb = data_buf.len() as u32 - bv;
+            locs.push((bv, cb));
+        }
+
+        let bv_mac = data_buf.len() as u32;
+
+        // Assemble GGF
+        let mut out = Vec::with_capacity(20 + bv_mac as usize + iloc_mac as usize * 8);
+        // GGF header (20 bytes)
+        out.extend_from_slice(&bo.to_le_bytes());
+        out.extend_from_slice(&osk.to_le_bytes());
+        out.extend_from_slice(&iloc_mac.to_le_bytes());
+        out.extend_from_slice(&bv_mac.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // clocFree
+        out.extend_from_slice(&cb_fixed.to_le_bytes());
+        // Data buffer
+        out.extend_from_slice(&data_buf);
+        // LOC table
+        for (bv, cb) in &locs {
+            out.extend_from_slice(&bv.to_le_bytes());
+            out.extend_from_slice(&cb.to_le_bytes());
+        }
+
+        Ok(out)
     }
 
     /// Find a chunk entry by type and number.
