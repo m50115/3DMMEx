@@ -1,19 +1,23 @@
 //! WASM bindings for the 3DMM viewer/editor.
 //!
 //! Exposes `WasmEngine` to JavaScript via wasm-bindgen.
-//! GPU rendering requires async init (see `render_frame` docs).
+//! GPU rendering is async — `render_frame` returns a `Promise<Uint8Array>`.
 
 use std::io::Cursor;
 
-use wasm_bindgen::prelude::*;
+use glam::Mat4;
 use js_sys::Uint8Array;
 use serde::{Deserialize, Serialize};
-
+use wasm_bindgen::prelude::*;
 use chunky_format::cfl::ChunkyFile;
 use chunky_format::collections::GenericGroup;
 use engine::actor::ActorOnFile;
 use engine::events::{ActorEvent, EventPayload};
-use engine::tag::{CTG_ACTR, CTG_GGAE, CTG_SCEN};
+use engine::model::Model;
+use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_PATH, CTG_SCEN, CTG_TMPL};
+use engine::transform::RoutePoint;
+use renderer::convert::orient_to_rotation_mat4;
+use renderer::headless::HeadlessRenderer;
 
 // ── DTOs serialized to JS ─────────────────────────────────────────────────
 
@@ -47,7 +51,7 @@ struct ActorInfo {
 /// const engine = WasmEngine.open_file(bytes);
 /// const scenes = engine.get_scene_list();
 /// const actors = engine.get_scene_actors(0);
-/// const bmp = engine.render_frame(0, 1, 640, 480);
+/// const bmp = await engine.render_frame(0, 1, 640, 480); // async
 /// engine.update_actor_position(0, 0, 1.0, 0.0, 0.0);
 /// const bytes = engine.to_bytes();
 /// ```
@@ -55,6 +59,9 @@ struct ActorInfo {
 pub struct WasmEngine {
     cfl: ChunkyFile,
     scenes: Vec<SceneInfo>,
+    /// Lazy-initialized GPU renderer. `None` until first `render_frame` call.
+    /// `None` also when WebGPU is unavailable in the browser.
+    renderer: Option<HeadlessRenderer>,
 }
 
 #[wasm_bindgen]
@@ -71,14 +78,13 @@ impl WasmEngine {
 
         let scenes = build_scene_list(&cfl);
 
-        Ok(WasmEngine { cfl, scenes })
+        Ok(WasmEngine { cfl, scenes, renderer: None })
     }
 
     /// Return an array of `{ scene_idx, frame_count, actor_count }` objects.
     #[wasm_bindgen]
     pub fn get_scene_list(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.scenes)
-            .unwrap_or(JsValue::NULL)
+        serde_wasm_bindgen::to_value(&self.scenes).unwrap_or(JsValue::NULL)
     }
 
     /// Return an array of `ActorInfo` objects for the given scene.
@@ -90,19 +96,50 @@ impl WasmEngine {
         }
     }
 
-    /// Render a scene frame, returning raw BMP bytes as Uint8Array.
+    /// Render a scene frame, returning BMP bytes as Uint8Array.
     ///
-    /// **Current limitation**: GPU rendering via wgpu requires async init that
-    /// is not yet wired up for WASM. Returns a dark-gray placeholder BMP.
+    /// GPU renderer is initialized lazily on first call.
+    /// Scenes whose actors all reference external templates (tmpls.3cn) will
+    /// render as clear color only until Ph8a.3 adds external file loading.
     ///
-    /// TODO Ph8a.2: async GPU init via wasm_bindgen_futures; readback via
-    /// Promise<Uint8Array> instead of sync Vec<u8>.
+    /// Returns `Err` if WebGPU is unavailable in the browser.
     #[wasm_bindgen]
-    pub fn render_frame(&self, _scene_idx: usize, _frame: i32, w: u32, h: u32) -> Uint8Array {
-        let bmp = encode_gray_bmp(w, h, 30, 30, 30);
+    pub async fn render_frame(
+        &mut self,
+        scene_idx: usize,
+        frame: i32,
+        w: u32,
+        h: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        // Lazy-init renderer on first call.
+        if self.renderer.is_none() {
+            self.renderer = HeadlessRenderer::new_async().await;
+            if self.renderer.is_none() {
+                return Err(JsValue::from_str("WebGPU not available in this browser"));
+            }
+        }
+        let r = self.renderer.as_mut().unwrap();
+
+        // Build render entries: (ctg, cno, transform) for sid=0 local BMDLs.
+        let entries = build_scene_entries(&self.cfl, scene_idx, frame);
+
+        // Ensure each model is uploaded to the GPU mesh cache.
+        for (key, _) in &entries {
+            if !r.has_mesh(*key) {
+                if let Some(model) = load_local_model(&self.cfl, *key) {
+                    r.ensure_mesh(*key, &model);
+                }
+            }
+        }
+
+        // Render frame.
+        let rgba = r.render_scene_async(&entries, w, h).await;
+
+        // Encode to BMP for canvas display.
+        let bmp = encode_rgba_to_bmp(&rgba, w, h);
         let out = Uint8Array::new_with_length(bmp.len() as u32);
         out.copy_from(&bmp);
-        out
+        Ok(out)
     }
 
     /// Edit an actor's position offset (dxyz_full_rte) in memory.
@@ -158,7 +195,6 @@ impl WasmEngine {
 // ── Free parse helper (spike proof-of-concept) ────────────────────────────
 
 /// Parse a .3mm file from raw bytes and return chunk count.
-/// Spike gate: proves wasm-pack build succeeds end-to-end.
 #[wasm_bindgen]
 pub fn parse_movie_info(bytes: &[u8]) -> Result<JsValue, JsValue> {
     let mut cursor = Cursor::new(bytes);
@@ -167,12 +203,226 @@ pub fn parse_movie_info(bytes: &[u8]) -> Result<JsValue, JsValue> {
     Ok(JsValue::from_f64(cfl.chunks.len() as f64))
 }
 
+// ── Scene entry resolver (MVP: sid=0 local BMDLs only) ───────────────────
+
+/// Build render entries for a scene frame.
+///
+/// Returns `Vec<((ctg, cno), world_transform)>` for sid=0 actors whose BMDL
+/// lives in the movie file itself. External-template actors (sid > 0) are
+/// silently skipped — they require tmpls.3cn (Ph8a.3).
+///
+/// TODO Ph8a.3: extract to engine::scene_resolver and handle sid>0 external.
+fn build_scene_entries(
+    cfl: &ChunkyFile,
+    scene_idx: usize,
+    frame: i32,
+) -> Vec<((u32, u32), Mat4)> {
+    let scen = match cfl.chunks.iter().filter(|c| c.id.ctg == CTG_SCEN).nth(scene_idx) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let mut entries = Vec::new();
+
+    for child in scen.children.iter().filter(|c| c.id.ctg == CTG_ACTR) {
+        let data = match cfl.get_chunk_data(child.id.ctg, child.id.cno) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        if data.len() < ActorOnFile::SIZE {
+            continue;
+        }
+        let arr: [u8; 44] = match data[..44].try_into() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let actf = match ActorOnFile::from_bytes(&arr) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+
+        // Skip null template or out-of-frame actors.
+        if actf.tag_tmpl.is_null() || actf.tag_tmpl.cno == 0 {
+            continue;
+        }
+        let has_range = actf.nfrm_last > actf.nfrm_first;
+        if has_range && (frame < actf.nfrm_first || frame > actf.nfrm_last) {
+            continue;
+        }
+
+        // Only TMPL actors whose template chunk is in the movie file itself (sid=0).
+        if actf.tag_tmpl.ctg != CTG_TMPL {
+            continue; // direct BMDL refs — skip for MVP
+        }
+        let tmpl_cno = actf.tag_tmpl.cno;
+        let tmpl = match cfl.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == tmpl_cno)
+        {
+            Some(t) => t,
+            None => continue, // sid>0 external TMPL — skip until Ph8a.3
+        };
+
+        // Collect local BMDL keys from the TMPL children.
+        let bmdl_keys: Vec<(u32, u32)> = tmpl
+            .children
+            .iter()
+            .filter(|ch| ch.id.ctg == CTG_BMDL)
+            .map(|ch| (CTG_BMDL, ch.id.cno))
+            .collect();
+        if bmdl_keys.is_empty() {
+            continue;
+        }
+
+        // Compute translation from PATH (first keyframe) + dxyz_full_rte.
+        let translation = {
+            let actr_top =
+                cfl.chunks.iter().find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
+            let path_child =
+                actr_top.and_then(|a| a.children.iter().find(|ch| ch.id.ctg == CTG_PATH));
+            if let Some(pc) = path_child {
+                if let Ok(path_data) = cfl.get_chunk_data(pc.id.ctg, pc.id.cno) {
+                    const GL_HDR: usize = 12;
+                    const RPT_SIZE: usize = RoutePoint::SIZE;
+                    if path_data.len() >= GL_HDR + RPT_SIZE {
+                        let iv_mac =
+                            i32::from_le_bytes(path_data[8..12].try_into().unwrap_or([0; 4]));
+                        if iv_mac >= 1 {
+                            if let Ok(rpt_bytes) =
+                                path_data[GL_HDR..GL_HDR + RPT_SIZE].try_into()
+                            {
+                                let rpt = RoutePoint::from_le_bytes(rpt_bytes);
+                                let dx = actf.dxyz_full_rte.x;
+                                let dy = actf.dxyz_full_rte.y;
+                                let dz = actf.dxyz_full_rte.z;
+                                let x = (rpt.position.x.0 + dx.0) as f64 / 65536.0;
+                                let y = (rpt.position.y.0 + dy.0) as f64 / 65536.0;
+                                let z = (rpt.position.z.0 + dz.0) as f64 / 65536.0;
+                                Mat4::from_translation(glam::Vec3::new(x as f32, y as f32, z as f32))
+                            } else {
+                                Mat4::IDENTITY
+                            }
+                        } else {
+                            Mat4::IDENTITY
+                        }
+                    } else {
+                        Mat4::IDENTITY
+                    }
+                } else {
+                    Mat4::IDENTITY
+                }
+            } else {
+                Mat4::IDENTITY
+            }
+        };
+
+        // Compute rotation from GGAE orient event (last event at or before `frame`).
+        let rotation = {
+            let actr_top =
+                cfl.chunks.iter().find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
+            let ggae_child =
+                actr_top.and_then(|a| a.children.iter().find(|ch| ch.id.ctg == CTG_GGAE));
+            if let Some(gc) = ggae_child {
+                if let Ok(ggae_data) = cfl.get_chunk_data(gc.id.ctg, gc.id.cno) {
+                    if let Ok(gg) = GenericGroup::read(&ggae_data) {
+                        let mut last_rot: Option<Mat4> = None;
+                        let mut last_nfrm = i32::MIN;
+                        for (fixed_bytes, var_bytes) in
+                            gg.fixed_entries.iter().zip(gg.variable_entries.iter())
+                        {
+                            if fixed_bytes.len() < 20 {
+                                continue;
+                            }
+                            let fixed_arr: &[u8; 20] = match fixed_bytes[..20].try_into() {
+                                Ok(a) => a,
+                                Err(_) => continue,
+                            };
+                            if let Ok(evt) = ActorEvent::parse(fixed_arr, var_bytes) {
+                                if let EventPayload::Orient(op) = &evt.payload {
+                                    if evt.header.nfrm <= frame && evt.header.nfrm >= last_nfrm {
+                                        last_nfrm = evt.header.nfrm;
+                                        last_rot = Some(orient_to_rotation_mat4(op));
+                                    }
+                                }
+                            }
+                        }
+                        last_rot.unwrap_or(Mat4::IDENTITY)
+                    } else {
+                        Mat4::IDENTITY
+                    }
+                } else {
+                    Mat4::IDENTITY
+                }
+            } else {
+                Mat4::IDENTITY
+            }
+        };
+
+        let transform = translation * rotation;
+        for key in bmdl_keys {
+            entries.push((key, transform));
+        }
+    }
+
+    entries
+}
+
+/// Load a BMDL model from the movie file's own chunks.
+fn load_local_model(cfl: &ChunkyFile, key: (u32, u32)) -> Option<Model> {
+    let data = cfl.get_chunk_data(key.0, key.1).ok()?;
+    Model::from_bytes(&data).ok()
+}
+
+// ── BMP encoder ────────────────────────────────────────────────────────────
+
+/// Encode raw RGBA8 pixels (top-down) to a 24-bit BMP byte stream.
+///
+/// Copied from commands.rs — TODO Ph8a.3: extract to engine::bmp if a third
+/// caller appears.
+fn encode_rgba_to_bmp(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let row_bytes = width as usize * 3;
+    let row_padded = (row_bytes + 3) & !3; // BMP rows must be 4-byte aligned
+    let pixel_data_size = row_padded * height as usize;
+    let file_size = 54 + pixel_data_size;
+
+    let mut bmp = vec![0u8; file_size];
+
+    // BITMAPFILEHEADER (14 bytes)
+    bmp[0..2].copy_from_slice(b"BM");
+    bmp[2..6].copy_from_slice(&(file_size as u32).to_le_bytes());
+    bmp[10..14].copy_from_slice(&54u32.to_le_bytes()); // pixel data offset
+
+    // BITMAPINFOHEADER (40 bytes)
+    bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+    bmp[18..22].copy_from_slice(&(width as i32).to_le_bytes());
+    bmp[22..26].copy_from_slice(&(-(height as i32)).to_le_bytes()); // negative = top-down
+    bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+    bmp[28..30].copy_from_slice(&24u16.to_le_bytes());
+    bmp[34..38].copy_from_slice(&(pixel_data_size as u32).to_le_bytes());
+
+    // Pixel data: RGBA → BGR
+    let pixel_start = 54;
+    for y in 0..height as usize {
+        let row_dst = pixel_start + y * row_padded;
+        for x in 0..width as usize {
+            let src = (y * width as usize + x) * 4;
+            let dst = row_dst + x * 3;
+            if src + 3 < rgba.len() {
+                bmp[dst] = rgba[src + 2]; // B
+                bmp[dst + 1] = rgba[src + 1]; // G
+                bmp[dst + 2] = rgba[src]; // R
+            }
+        }
+    }
+    bmp
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────
 
 fn build_scene_list(cfl: &ChunkyFile) -> Vec<SceneInfo> {
     let mut scenes = Vec::new();
     for (idx, chunk) in cfl.chunks.iter().filter(|c| c.id.ctg == CTG_SCEN).enumerate() {
-        let frame_count: i32 = chunk.children.iter()
+        let frame_count: i32 = chunk
+            .children
+            .iter()
             .filter(|c| c.id.ctg == CTG_ACTR)
             .filter_map(|c| cfl.get_chunk_data(c.id.ctg, c.id.cno).ok())
             .filter(|d| d.len() >= ActorOnFile::SIZE)
@@ -191,7 +441,9 @@ fn build_scene_list(cfl: &ChunkyFile) -> Vec<SceneInfo> {
 }
 
 fn build_actor_list(cfl: &ChunkyFile, scene_idx: usize) -> Result<Vec<ActorInfo>, String> {
-    let scen = cfl.chunks.iter()
+    let scen = cfl
+        .chunks
+        .iter()
         .filter(|c| c.id.ctg == CTG_SCEN)
         .nth(scene_idx)
         .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
@@ -203,7 +455,9 @@ fn build_actor_list(cfl: &ChunkyFile, scene_idx: usize) -> Result<Vec<ActorInfo>
             Some(d) => d,
             None => continue,
         };
-        if raw.len() < ActorOnFile::SIZE { continue; }
+        if raw.len() < ActorOnFile::SIZE {
+            continue;
+        }
 
         let arr: [u8; 44] = match raw[..44].try_into() {
             Ok(a) => a,
@@ -222,14 +476,19 @@ fn build_actor_list(cfl: &ChunkyFile, scene_idx: usize) -> Result<Vec<ActorInfo>
         let mut ya_deg = 0.0f32;
         let mut za_deg = 0.0f32;
         {
-            let actr_top = cfl.chunks.iter().find(|c| c.id.ctg == CTG_ACTR && c.id.cno == cno);
+            let actr_top =
+                cfl.chunks.iter().find(|c| c.id.ctg == CTG_ACTR && c.id.cno == cno);
             if let Some(actr) = actr_top {
                 if let Some(ggae_ref) = actr.children.iter().find(|ch| ch.id.ctg == CTG_GGAE) {
                     if let Ok(ggae_data) = cfl.get_chunk_data(ggae_ref.id.ctg, ggae_ref.id.cno) {
                         if let Ok(gg) = GenericGroup::read(&ggae_data) {
                             let mut best_nfrm = i32::MAX;
-                            for (fe, ve) in gg.fixed_entries.iter().zip(gg.variable_entries.iter()) {
-                                if fe.len() < 20 { continue; }
+                            for (fe, ve) in
+                                gg.fixed_entries.iter().zip(gg.variable_entries.iter())
+                            {
+                                if fe.len() < 20 {
+                                    continue;
+                                }
                                 let fixed_arr: &[u8; 20] = match fe[..20].try_into() {
                                     Ok(a) => a,
                                     Err(_) => continue,
@@ -269,58 +528,16 @@ fn build_actor_list(cfl: &ChunkyFile, scene_idx: usize) -> Result<Vec<ActorInfo>
 }
 
 fn resolve_actor_cno(cfl: &ChunkyFile, scene_idx: usize, actor_idx: usize) -> Result<u32, String> {
-    let scen = cfl.chunks.iter()
+    let scen = cfl
+        .chunks
+        .iter()
         .filter(|c| c.id.ctg == CTG_SCEN)
         .nth(scene_idx)
         .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
-    scen.children.iter()
+    scen.children
+        .iter()
         .filter(|c| c.id.ctg == CTG_ACTR)
         .nth(actor_idx)
         .ok_or_else(|| format!("Actor {actor_idx} not found in scene {scene_idx}"))
         .map(|c| c.id.cno)
-}
-
-/// Encode a solid-color 24-bit BMP.
-fn encode_gray_bmp(width: u32, height: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
-    let row_size = ((width * 3 + 3) / 4) * 4;
-    let pixel_data_size = row_size * height;
-    let file_size = 54 + pixel_data_size;
-
-    let mut bmp = Vec::with_capacity(file_size as usize);
-
-    // BMP file header (14 bytes)
-    bmp.extend_from_slice(b"BM");
-    bmp.extend_from_slice(&file_size.to_le_bytes());
-    bmp.extend_from_slice(&0u32.to_le_bytes()); // reserved
-    bmp.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
-
-    // DIB header — BITMAPINFOHEADER (40 bytes)
-    bmp.extend_from_slice(&40u32.to_le_bytes());  // header size
-    bmp.extend_from_slice(&width.to_le_bytes());
-    bmp.extend_from_slice(&(height as i32).to_le_bytes()); // positive = bottom-up
-    bmp.extend_from_slice(&1u16.to_le_bytes());   // color planes
-    bmp.extend_from_slice(&24u16.to_le_bytes());  // bits per pixel
-    bmp.extend_from_slice(&0u32.to_le_bytes());   // compression = none
-    bmp.extend_from_slice(&pixel_data_size.to_le_bytes());
-    bmp.extend_from_slice(&2835u32.to_le_bytes()); // H pixels/meter
-    bmp.extend_from_slice(&2835u32.to_le_bytes()); // V pixels/meter
-    bmp.extend_from_slice(&0u32.to_le_bytes());   // colors in table
-    bmp.extend_from_slice(&0u32.to_le_bytes());   // important colors
-
-    // Pixel data — BMP stores BGR, bottom row first
-    for _ in 0..height {
-        let mut row = Vec::with_capacity(row_size as usize);
-        for _ in 0..width {
-            row.push(b); // B
-            row.push(g); // G
-            row.push(r); // R
-        }
-        // Pad row to multiple of 4 bytes
-        while row.len() < row_size as usize {
-            row.push(0);
-        }
-        bmp.extend_from_slice(&row);
-    }
-
-    bmp
 }

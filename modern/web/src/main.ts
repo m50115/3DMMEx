@@ -135,7 +135,7 @@ async function renderFrame() {
   if (!engine) return;
   clearError();
   try {
-    const bmp = engine.render_frame(currentScene, 1, 640, 480);
+    const bmp = await engine.render_frame(currentScene, 1, 640, 480);
     const blob = new Blob([bmp.slice()], { type: 'image/bmp' });
     const img = await createImageBitmap(blob);
     const canvas = document.getElementById('viewport') as HTMLCanvasElement;
