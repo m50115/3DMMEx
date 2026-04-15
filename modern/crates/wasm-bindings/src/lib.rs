@@ -183,21 +183,30 @@ impl WasmEngine {
         let actr_cno = resolve_actor_cno(&self.cfl, scene_idx, actor_idx)
             .map_err(|e| JsValue::from_str(&e))?;
 
-        let raw = self.cfl.chunk_data
-            .get(&(CTG_ACTR, actr_cno))
-            .ok_or_else(|| JsValue::from_str(&format!("ACTR cno={actr_cno} not in chunk_data")))?
-            .clone();
+        // Read decompressed bytes (handles PACKED chunks).
+        let mut data = self.cfl
+            .get_chunk_data(CTG_ACTR, actr_cno)
+            .map_err(|e| JsValue::from_str(&format!("ACTR cno={actr_cno}: {e}")))?;
 
-        if raw.len() < ActorOnFile::SIZE {
+        if data.len() < ActorOnFile::SIZE {
             return Err(JsValue::from_str("ACTR chunk too small"));
         }
 
-        let mut new_raw = raw;
-        new_raw[4..8].copy_from_slice(&((dx * 65536.0) as i32).to_le_bytes());
-        new_raw[8..12].copy_from_slice(&((dy * 65536.0) as i32).to_le_bytes());
-        new_raw[12..16].copy_from_slice(&((dz * 65536.0) as i32).to_le_bytes());
+        data[4..8].copy_from_slice(&((dx * 65536.0) as i32).to_le_bytes());
+        data[8..12].copy_from_slice(&((dy * 65536.0) as i32).to_le_bytes());
+        data[12..16].copy_from_slice(&((dz * 65536.0) as i32).to_le_bytes());
 
-        self.cfl.chunk_data.insert((CTG_ACTR, actr_cno), new_raw);
+        let new_cb = data.len() as u32;
+        self.cfl.chunk_data.insert((CTG_ACTR, actr_cno), data);
+
+        // Clear PACKED flag + sync `cb` so the chunk is treated as uncompressed
+        // on subsequent reads and on serialization.
+        if let Some(entry) = self.cfl.chunks.iter_mut()
+            .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == actr_cno)
+        {
+            entry.flags.remove(chunky_format::chunk::ChunkFlags::PACKED);
+            entry.cb = new_cb;
+        }
         Ok(())
     }
 
@@ -492,9 +501,10 @@ fn build_actor_list(cfl: &ChunkyFile, scene_idx: usize) -> Result<Vec<ActorInfo>
     let mut actors = Vec::new();
     for (idx, child) in scen.children.iter().filter(|c| c.id.ctg == CTG_ACTR).enumerate() {
         let cno = child.id.cno;
-        let raw = match cfl.chunk_data.get(&(CTG_ACTR, cno)) {
-            Some(d) => d,
-            None => continue,
+        // Decompress if packed so the dxyz_full_rte fields reflect on-disk values.
+        let raw = match cfl.get_chunk_data(CTG_ACTR, cno) {
+            Ok(d) => d,
+            Err(_) => continue,
         };
         if raw.len() < ActorOnFile::SIZE {
             continue;
