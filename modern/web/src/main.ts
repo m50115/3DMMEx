@@ -21,11 +21,27 @@ interface ActorInfo {
   za_deg: number;
 }
 
+// ── Resolution presets ────────────────────────────────────────────────────────
+
+const RESOLUTIONS: Record<string, { w: number; h: number }> = {
+  '480p':  { w: 640,  h: 480  },
+  '720p':  { w: 1280, h: 720  },
+  '1080p': { w: 1920, h: 1080 },
+};
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 let engine: WasmEngine | null = null;
 let currentScene = 0;
 let currentFileName = 'movie.3mm';
+
+/** Current viewport resolution key, persisted in localStorage. */
+let currentResKey: string = localStorage.getItem('dmmex.resolution') ?? '480p';
+if (!RESOLUTIONS[currentResKey]) currentResKey = '480p';
+
+function getVpDims(): { w: number; h: number } {
+  return RESOLUTIONS[currentResKey] ?? RESOLUTIONS['480p'];
+}
 
 /** Cached Blob URLs for scene thumbnails. Revoked on new movie load. */
 const thumbCache = new Map<number, string>();
@@ -36,11 +52,27 @@ let thumbGenId = 0;
 
 async function bootstrap() {
   await init();
+  setupResolutionSelector();
   setupDropzone();
   setupFileInput();
   setupDownload();
   setupContentFiles();
   setupSceneTextToggle();
+}
+
+function setupResolutionSelector() {
+  const sel = document.getElementById('res') as HTMLSelectElement | null;
+  if (!sel) return;
+  // Restore saved selection.
+  sel.value = currentResKey;
+  sel.addEventListener('change', async () => {
+    const newKey = sel.value;
+    if (!RESOLUTIONS[newKey]) return;
+    currentResKey = newKey;
+    localStorage.setItem('dmmex.resolution', newKey);
+    // Re-render current scene at new resolution.
+    await renderFrame();
+  });
 }
 
 function setupSceneTextToggle() {
@@ -255,11 +287,15 @@ async function applyActorPosition(row: HTMLElement) {
 async function renderFrame() {
   if (!engine) return;
   clearError();
+  const { w, h } = getVpDims();
   try {
-    const bmp = await engine.render_frame(currentScene, 1, 640, 480);
+    const bmp = await engine.render_frame(currentScene, 1, w, h);
     const blob = new Blob([bmp.slice()], { type: 'image/bmp' });
     const img = await createImageBitmap(blob);
     const canvas = document.getElementById('viewport') as HTMLCanvasElement;
+    // Resize canvas to match the rendered resolution.
+    canvas.width = w;
+    canvas.height = h;
     canvas.getContext('2d')!.drawImage(img, 0, 0);
   } catch (err) {
     showError(`Render error: ${err}`);

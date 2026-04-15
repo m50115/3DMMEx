@@ -6,10 +6,27 @@ import type { MovieInfo, SceneInfo, SoundEntry, ActorInfo, TemplateInfo } from "
 import { Timeline } from "./Timeline";
 import { Viewport } from "./Viewport";
 
+// ── Resolution presets ────────────────────────────────────────────────────────
+
+const RESOLUTIONS = [
+  { label: "480p (640×480)",   key: "480p",  w: 640,  h: 480  },
+  { label: "720p (1280×720)",  key: "720p",  w: 1280, h: 720  },
+  { label: "1080p (1920×1080)", key: "1080p", w: 1920, h: 1080 },
+] as const;
+
+type ResolutionKey = typeof RESOLUTIONS[number]["key"];
+
+function loadStoredResolution(): ResolutionKey {
+  const stored = localStorage.getItem("dmmex.resolution");
+  if (stored === "720p" || stored === "1080p") return stored;
+  return "480p";
+}
+
 /** Build a stream:// URL for a given scene/frame. Cache-bust with timestamp.
- *  frame is 0-indexed in frontend; backend expects 1-indexed (3DMM convention). */
-function streamUrl(scene: number, frame: number): string {
-  return `stream://localhost/frame/${scene}/${frame + 1}?t=${Date.now()}`;
+ *  frame is 0-indexed in frontend; backend expects 1-indexed (3DMM convention).
+ *  w/h are optional path segments; backend defaults to 640×480 if omitted. */
+function streamUrl(scene: number, frame: number, w: number, h: number): string {
+  return `stream://localhost/frame/${scene}/${frame + 1}/${w}/${h}?t=${Date.now()}`;
 }
 
 /** Resolve when the img element fires load, reject on error. */
@@ -33,6 +50,12 @@ export function Studio() {
   const [currentFrame, setCurrentFrame] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [fps, setFps] = useState<number | null>(null);
+  const [resKey, setResKey] = useState<ResolutionKey>(loadStoredResolution);
+
+  // Derived viewport dimensions from the selected resolution preset.
+  const resPreset = RESOLUTIONS.find(r => r.key === resKey) ?? RESOLUTIONS[0];
+  const vpW = resPreset.w;
+  const vpH = resPreset.h;
 
   // ── Editor state ──────────────────────────────────────────────────────
   const [actors, setActors] = useState<ActorInfo[]>([]);
@@ -51,6 +74,11 @@ export function Studio() {
   // Playback loop — recursive setTimeout so frames don't queue when render is slow.
   const playingRef = useRef(playing);
   useEffect(() => { playingRef.current = playing; }, [playing]);
+
+  // Keep a ref so the playback loop always reads the current resolution.
+  const vpWRef = useRef(vpW);
+  const vpHRef = useRef(vpH);
+  useEffect(() => { vpWRef.current = vpW; vpHRef.current = vpH; }, [vpW, vpH]);
 
   useEffect(() => {
     if (!playing) return;
@@ -77,7 +105,7 @@ export function Studio() {
 
         const t0 = performance.now();
         // Set stream:// src — WKWebView fetches it, Rust renders → returns BMP bytes
-        img.src = streamUrl(activeScene, f);
+        img.src = streamUrl(activeScene, f, vpWRef.current, vpHRef.current);
         try {
           await waitForLoad(img);
           const elapsed = performance.now() - t0;
@@ -136,7 +164,7 @@ export function Studio() {
       }
 
       setFrameLoading(true);
-      setFrameSrc(streamUrl(0, 0)); // onLoad/onError handlers clear frameLoading
+      setFrameSrc(streamUrl(0, 0, vpW, vpH)); // onLoad/onError handlers clear frameLoading
     } catch (err) {
       setStatusMsg(`Error: ${err}`);
     }
@@ -176,7 +204,7 @@ export function Studio() {
     setCurrentFrame(0);
     setFrameLoading(true);
     setFrameError(null);
-    setFrameSrc(streamUrl(idx, 0));
+    setFrameSrc(streamUrl(idx, 0, vpW, vpH));
   }, []);
 
   const handlePlayPause = useCallback(() => {
@@ -201,7 +229,7 @@ export function Studio() {
     setCurrentFrame(next);
     setFrameLoading(true);
     setFrameError(null);
-    setFrameSrc(streamUrl(activeScene, next));
+    setFrameSrc(streamUrl(activeScene, next, vpW, vpH));
   }, [playing, activeScene, scenes, currentFrame]);
 
   const handlePlaySound = useCallback(async (cno: number) => {
@@ -247,7 +275,7 @@ export function Studio() {
       setActors(updated);
       setFrameLoading(true);
       setFrameError(null);
-      setFrameSrc(streamUrl(activeScene, currentFrame));
+      setFrameSrc(streamUrl(activeScene, currentFrame, vpWRef.current, vpHRef.current));
       setStatusMsg(`Actor ${selectedActorIdx} position updated.`);
     } catch (err) {
       setStatusMsg(`Update failed: ${err}`);
@@ -264,7 +292,7 @@ export function Studio() {
       setActors(updated);
       setFrameLoading(true);
       setFrameError(null);
-      setFrameSrc(streamUrl(activeScene, currentFrame));
+      setFrameSrc(streamUrl(activeScene, currentFrame, vpWRef.current, vpHRef.current));
       setStatusMsg(`Actor ${selectedActorIdx} frame range updated.`);
     } catch (err) {
       setStatusMsg(`Frame range update failed: ${err}`);
@@ -282,7 +310,7 @@ export function Studio() {
       setActors(updated);
       setFrameLoading(true);
       setFrameError(null);
-      setFrameSrc(streamUrl(activeScene, currentFrame));
+      setFrameSrc(streamUrl(activeScene, currentFrame, vpWRef.current, vpHRef.current));
       setStatusMsg(`Actor ${selectedActorIdx} orientation updated.`);
     } catch (err) {
       setStatusMsg(`Orientation update failed: ${err}`);
@@ -306,7 +334,7 @@ export function Studio() {
       setActors(updated);
       setFrameLoading(true);
       setFrameError(null);
-      setFrameSrc(streamUrl(activeScene, currentFrame));
+      setFrameSrc(streamUrl(activeScene, currentFrame, vpWRef.current, vpHRef.current));
       setStatusMsg(`Added actor cno=${newCno}.`);
     } catch (err) {
       setStatusMsg(`Add actor failed: ${err}`);
@@ -321,7 +349,7 @@ export function Studio() {
       if (selectedActorIdx === actorIdx) setSelectedActorIdx(null);
       setFrameLoading(true);
       setFrameError(null);
-      setFrameSrc(streamUrl(activeScene, currentFrame));
+      setFrameSrc(streamUrl(activeScene, currentFrame, vpWRef.current, vpHRef.current));
       setStatusMsg(`Removed actor ${actorIdx}.`);
     } catch (err) {
       setStatusMsg(`Remove actor failed: ${err}`);
@@ -329,6 +357,18 @@ export function Studio() {
   }, [activeScene, selectedActorIdx, currentFrame]);
 
   const activeSceneInfo = scenes[activeScene];
+
+  // Re-render the viewport whenever the resolution changes (and a movie is loaded).
+  const handleResolutionChange = useCallback((newKey: ResolutionKey) => {
+    setResKey(newKey);
+    localStorage.setItem("dmmex.resolution", newKey);
+    if (!movie) return;
+    const preset = RESOLUTIONS.find(r => r.key === newKey) ?? RESOLUTIONS[0];
+    setPlaying(false);
+    setFrameLoading(true);
+    setFrameError(null);
+    setFrameSrc(streamUrl(activeScene, currentFrame, preset.w, preset.h));
+  }, [movie, activeScene, currentFrame]);
 
   return (
     <div className="studio">
@@ -341,6 +381,21 @@ export function Studio() {
         <button className="btn-primary" onClick={handleOpenFile}>
           Open .3mm
         </button>
+        {/* Resolution selector */}
+        <select
+          value={resKey}
+          onChange={(e) => handleResolutionChange(e.target.value as ResolutionKey)}
+          title="Viewport resolution"
+          style={{
+            background: 'var(--bg)', border: '1px solid var(--border)',
+            color: 'var(--text)', borderRadius: 3, padding: '3px 6px',
+            fontSize: 12, cursor: 'pointer',
+          }}
+        >
+          {RESOLUTIONS.map(r => (
+            <option key={r.key} value={r.key}>{r.label}</option>
+          ))}
+        </select>
         {movie && (
           <span className="toolbar-info">
             {movie.file_name} · {movie.scene_count} scenes · {movie.total_frames} frames
