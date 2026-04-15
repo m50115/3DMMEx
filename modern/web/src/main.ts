@@ -118,16 +118,41 @@ function selectScene(idx: number) {
 function renderActors() {
   if (!engine) return;
   const actors = engine.get_scene_actors(currentScene) as ActorInfo[];
-  document.getElementById('actors')!.innerHTML =
-    actors.length === 0
-      ? '<div style="color:#666;font-size:0.8rem">No actors</div>'
-      : actors.map(a =>
-          `<div class="actor-row">
-            #${a.actor_idx} cno=${a.cno}
-            &nbsp; pos (${a.dx.toFixed(2)}, ${a.dy.toFixed(2)}, ${a.dz.toFixed(2)})
-            &nbsp; frames ${a.nfrm_first}–${a.nfrm_last}
-          </div>`
-        ).join('');
+  const container = document.getElementById('actors')!;
+  if (actors.length === 0) {
+    container.innerHTML = '<div style="color:#666;font-size:0.8rem">No actors</div>';
+    return;
+  }
+  container.innerHTML = actors.map(a => `
+    <div class="actor-row" data-actor="${a.actor_idx}">
+      <div class="actor-info">#${a.actor_idx} cno=${a.cno} &nbsp; frames ${a.nfrm_first}–${a.nfrm_last}</div>
+      <div class="actor-edit">
+        <label>dX <input type="number" step="1" value="${a.dx.toFixed(2)}" data-axis="dx"></label>
+        <label>dY <input type="number" step="1" value="${a.dy.toFixed(2)}" data-axis="dy"></label>
+        <label>dZ <input type="number" step="1" value="${a.dz.toFixed(2)}" data-axis="dz"></label>
+        <button class="apply-btn">Aplicar</button>
+      </div>
+    </div>`).join('');
+
+  container.querySelectorAll<HTMLElement>('.apply-btn').forEach(btn => {
+    btn.addEventListener('click', () => applyActorPosition(btn.closest('[data-actor]') as HTMLElement));
+  });
+}
+
+async function applyActorPosition(row: HTMLElement) {
+  if (!engine) return;
+  const actorIdx = parseInt(row.dataset.actor!);
+  const dx = parseFloat((row.querySelector('[data-axis="dx"]') as HTMLInputElement).value);
+  const dy = parseFloat((row.querySelector('[data-axis="dy"]') as HTMLInputElement).value);
+  const dz = parseFloat((row.querySelector('[data-axis="dz"]') as HTMLInputElement).value);
+  try {
+    engine.update_actor_position(currentScene, actorIdx, dx, dy, dz);
+    setStatus(`Actor #${actorIdx} actualizado — re-renderizando…`);
+    await renderFrame();
+    setStatus(`Actor #${actorIdx} posición aplicada`);
+  } catch (err) {
+    showError(`Error actualizando actor #${actorIdx}: ${err}`);
+  }
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
