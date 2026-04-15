@@ -43,7 +43,12 @@ pub fn handle<R: Runtime>(
     let t0 = std::time::Instant::now();
     let rgba = match render_to_rgba(state.inner(), scene_idx, frame, 640, 480) {
         Ok(r) => r,
-        Err(e) => return error_response(500, e.as_bytes()),
+        Err(e) => {
+            // Return a blank dark-gray frame instead of HTTP 500 so the frontend
+            // <img> doesn't fire onError. The error is logged to stderr.
+            eprintln!("[RENDER] scene={scene_idx} frame={frame} err={e}");
+            vec![30u8; 640 * 480 * 4] // dark gray RGBA
+        }
     };
     let bmp = encode_rgba_to_bmp(&rgba, 640, 480);
     eprintln!("[PERF-6b] scene={scene_idx} frame={frame} total={}ms", t0.elapsed().as_millis());

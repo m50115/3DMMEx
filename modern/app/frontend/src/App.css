@@ -66,6 +66,18 @@ html, body, #root {
 
 .btn-primary:hover { opacity: 0.85; }
 
+.btn-secondary {
+  padding: 6px 14px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-secondary:hover { background: var(--accent); color: #fff; }
+
 /* Main area */
 .main-area {
   display: flex;

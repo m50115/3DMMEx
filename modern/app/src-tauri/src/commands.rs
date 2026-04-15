@@ -19,7 +19,8 @@ use engine::events::{ActorEvent, EventPayload, OrientPayload, aet};
 use engine::fixedpoint::FixedAngle;
 use engine::model::Model;
 use engine::msnd::MovieSound;
-use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MSND, CTG_PATH, CTG_SCEN, CTG_TDF, CTG_TDT, CTG_TMPL, CTG_WAVE};
+use chunky_format::cfl::{ChunkyHeader, CTG_CREATOR_3DMM, MAGIC_CHUNKY, VERSION_BACK, VERSION_CURRENT};
+use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_GGFR, CTG_GGST, CTG_GST, CTG_MSND, CTG_MVIE, CTG_PATH, CTG_SCEN, CTG_TDF, CTG_TDT, CTG_TMPL, CTG_WAVE};
 use engine::tdf::BrTdf;
 use engine::tdt::{BrTdt, Tdts};
 use engine::transform::RoutePoint;
@@ -308,8 +309,10 @@ pub(crate) fn render_to_rgba(
     // --- Step 1: locate SCEN chunk and extract actor tag_tmpls + transforms --
     // Each entry: (ctg, cno, transform, tdt_data)
     // tdt_data = Some((tdf_cno, tdts, stn)) for TDT actors; None for normal actors.
+    // local_bmdls = pre-extracted BMDL (ctg,cno) keys from lf.cfl for sid=0 non-TDT actors.
     // Extracted while holding the loaded_file lock so Step 2 needs no re-lock.
-    let tag_tmpls: Vec<(u32, u32, glam::Mat4, Option<(u32, Tdts, String)>)> = {
+    // Tuple: (ctg, cno, sid, transform, tdt_data, local_bmdls)
+    let tag_tmpls: Vec<(u32, u32, i32, glam::Mat4, Option<(u32, Tdts, String)>, Vec<(u32,u32)>)> = {
         let guard = state.loaded_file.lock().unwrap();
         let lf = guard.as_ref().ok_or("No file loaded")?;
 
@@ -404,21 +407,38 @@ pub(crate) fn render_to_rgba(
 
                 // For TDT (3D text) actors: extract (tdf_cno, tdts, stn) while we hold
                 // the loaded_file lock so Step 2 can use them without re-locking.
-                let tdt_data: Option<(u32, Tdts, String)> = if actf.tag_tmpl.ctg == CTG_TMPL {
-                    let tmpl_local = lf.cfl.chunks.iter()
-                        .find(|c| c.id.ctg == CTG_TMPL && c.id.cno == actf.tag_tmpl.cno);
-                    tmpl_local.and_then(|tmpl| {
-                        let tdt_child = tmpl.children.iter().find(|ch| ch.id.ctg == CTG_TDT)?;
-                        let tdt_bytes = lf.cfl.get_chunk_data(CTG_TDT, tdt_child.id.cno).ok()?;
-                        let tdt = BrTdt::from_bytes(&tdt_bytes).ok()?;
-                        let stn = tmpl.name.clone().unwrap_or_default();
-                        if stn.is_empty() { return None; }
-                        Some((tdt.tag_tdf.cno, tdt.tdts, stn))
-                    })
-                } else {
-                    None
-                };
-                tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, translation * rotation, tdt_data));
+                let sid = actf.tag_tmpl.sid;
+                let (tdt_data, local_bmdls): (Option<(u32, Tdts, String)>, Vec<(u32,u32)>) =
+                    if actf.tag_tmpl.ctg == CTG_TMPL {
+                        let tmpl_local = lf.cfl.chunks.iter()
+                            .find(|c| c.id.ctg == CTG_TMPL && c.id.cno == actf.tag_tmpl.cno);
+                        if let Some(tmpl) = tmpl_local {
+                            // Try TDT path first
+                            let tdt = tmpl.children.iter().find(|ch| ch.id.ctg == CTG_TDT)
+                                .and_then(|tdt_child| {
+                                    let tdt_bytes = lf.cfl.get_chunk_data(CTG_TDT, tdt_child.id.cno).ok()?;
+                                    let tdt = BrTdt::from_bytes(&tdt_bytes).ok()?;
+                                    let stn = tmpl.name.clone().unwrap_or_default();
+                                    if stn.is_empty() { return None; }
+                                    Some((tdt.tag_tdf.cno, tdt.tdts, stn))
+                                });
+                            if tdt.is_some() {
+                                (tdt, vec![])
+                            } else {
+                                // sid=0 non-TDT: extract local BMDL keys now while lock held
+                                let bmdls: Vec<(u32,u32)> = tmpl.children.iter()
+                                    .filter(|ch| ch.id.ctg == CTG_BMDL)
+                                    .map(|ch| (CTG_BMDL, ch.id.cno))
+                                    .collect();
+                                (None, bmdls)
+                            }
+                        } else {
+                            (None, vec![]) // sid>0: external TMPL, Step 2 uses tmpls.3cn
+                        }
+                    } else {
+                        (None, vec![])
+                    };
+                tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, sid, translation * rotation, tdt_data, local_bmdls));
             }
         }
         tags
@@ -440,8 +460,8 @@ pub(crate) fn render_to_rgba(
     let mut scene_entries: Vec<((u32, u32), glam::Mat4)> = Vec::new();
     let mut diag: Vec<String> = Vec::new();
 
-    for (ctg, cno, transform, tdt_data) in &tag_tmpls {
-        let (ctg, cno, transform) = (*ctg, *cno, *transform);
+    for (ctg, cno, sid, transform, tdt_data, local_bmdls) in &tag_tmpls {
+        let (ctg, cno, sid, transform) = (*ctg, *cno, *sid, *transform);
 
         // --- TDT (3D text) path — fan-movie actors with per-char glyph BMDLs ---
         if let Some((tdf_cno, tdts, stn)) = tdt_data {
@@ -515,8 +535,34 @@ pub(crate) fn render_to_rgba(
             }
         }
 
+        // --- sid=0 non-TDT local TMPL: use pre-extracted BMDL keys from lf.cfl ----
+        if !local_bmdls.is_empty() {
+            let guard = state.loaded_file.lock().unwrap();
+            let lf = match guard.as_ref() {
+                Some(l) => l,
+                None => { diag.push(format!("TMPL:{cno} sid=0 but no file loaded")); continue; }
+            };
+            let mut found_key: Option<(u32, u32)> = None;
+            for &bmdl_key in local_bmdls {
+                if gpu.has_mesh(bmdl_key) { found_key = Some(bmdl_key); break; }
+                if let Ok(data) = lf.cfl.get_chunk_data(bmdl_key.0, bmdl_key.1) {
+                    if data.len() >= 80 {
+                        if let Ok(m) = Model::from_bytes(&data) {
+                            gpu.ensure_mesh(bmdl_key, &m);
+                            if gpu.has_mesh(bmdl_key) { found_key = Some(bmdl_key); break; }
+                        }
+                    }
+                }
+            }
+            match found_key {
+                Some(k) => scene_entries.push((k, transform)),
+                None => diag.push(format!("TMPL:{cno} sid=0 — no renderable local BMDL")),
+            }
+            continue;
+        }
+
         if ctg == CTG_TMPL {
-            // --- primary path: look up TMPL in tmpls.3cn ---
+            // --- primary path: look up TMPL in tmpls.3cn (sid>0 external) ---
             let tmpl_opt = tmpls.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == cno);
             if let Some(tmpl) = tmpl_opt {
                 let bmdl_children: Vec<_> = tmpl.children.iter().filter(|ch| ch.id.ctg == CTG_BMDL).collect();
@@ -550,7 +596,7 @@ pub(crate) fn render_to_rgba(
                 continue;
             }
 
-            diag.push(format!("TMPL:{cno} not found in tmpls.3cn"));
+            diag.push(format!("TMPL:{cno} sid={sid} not found in tmpls.3cn"));
         } else if ctg == CTG_BMDL {
             let bmdl_key = (CTG_BMDL, cno);
             if !gpu.has_mesh(bmdl_key) {
@@ -1177,6 +1223,141 @@ pub fn remove_actor(
     }
 
     Ok(())
+}
+
+// ── Phase 7e — Create movie from scratch ─────────────────────────────────
+
+/// Create a new empty .3mm file and load it into AppState.
+///
+/// Writes the minimum chunk set that 3DMM 1995 opens without crashing:
+///   MVIE (8b MFP) → GST rollcall (12b, chid=0) + SCEN (16b SCENH, chid=0)
+///   SCEN → GGFR (12b, chid=0) + GGST (12b, chid=1)
+#[tauri::command]
+pub fn create_movie(path: String, state: State<AppState>) -> Result<MovieInfo, String> {
+    let mut cfl = ChunkyFile {
+        header: ChunkyHeader {
+            magic: MAGIC_CHUNKY,
+            ctg_creator: CTG_CREATOR_3DMM,
+            version_current: VERSION_CURRENT,
+            version_back: VERSION_BACK,
+            byte_order: 1,
+            os_kind: 0,
+            fp_mac: 0,
+            fp_index: 0,
+            cb_index: 0,
+            fp_map: 0,
+            cb_map: 0,
+            reserved: [0; 23],
+        },
+        chunks: vec![],
+        chunk_data: std::collections::HashMap::new(),
+        free_map: vec![],
+        raw_index: vec![],
+    };
+
+    // ── GGFR: empty frame-events GG (SEV entry_size=8) ─────────────────────
+    let ggfr_bytes = GenericGroup {
+        fixed_size: 8, bo: 1, osk: 0,
+        fixed_entries: vec![], variable_entries: vec![],
+    }.write();
+    cfl.chunks.push(ChunkEntry {
+        id: ChunkId { ctg: CTG_GGFR, cno: 1 },
+        fp: 0, cb: ggfr_bytes.len() as u32,
+        flags: ChunkFlags::NONE, child_count: 0, ref_count: 0, rti: 0,
+        children: vec![], name: None,
+    });
+    cfl.chunk_data.insert((CTG_GGFR, 1), ggfr_bytes);
+
+    // ── GGST: empty start-events GG (SEV entry_size=8) ─────────────────────
+    let ggst_bytes = GenericGroup {
+        fixed_size: 8, bo: 1, osk: 0,
+        fixed_entries: vec![], variable_entries: vec![],
+    }.write();
+    cfl.chunks.push(ChunkEntry {
+        id: ChunkId { ctg: CTG_GGST, cno: 1 },
+        fp: 0, cb: ggst_bytes.len() as u32,
+        flags: ChunkFlags::NONE, child_count: 0, ref_count: 0, rti: 0,
+        children: vec![], name: None,
+    });
+    cfl.chunk_data.insert((CTG_GGST, 1), ggst_bytes);
+
+    // ── SCEN: 16b SCENH (nfrmFirst=1, nfrmLast=1, trans=transCut=0) ────────
+    let mut scenh = [0u8; 16];
+    scenh[0..2].copy_from_slice(&1u16.to_le_bytes());  // bo = kboCur (LE)
+    scenh[2..4].copy_from_slice(&0u16.to_le_bytes());  // osk
+    scenh[4..8].copy_from_slice(&1i32.to_le_bytes());  // nfrmLast = 1
+    scenh[8..12].copy_from_slice(&1i32.to_le_bytes()); // nfrmFirst = 1
+    scenh[12..16].copy_from_slice(&0i32.to_le_bytes()); // trans = transCut = 0
+    cfl.chunks.push(ChunkEntry {
+        id: ChunkId { ctg: CTG_SCEN, cno: 1 },
+        fp: 0, cb: 16,
+        flags: ChunkFlags::NONE, child_count: 2, ref_count: 0, rti: 0,
+        children: vec![
+            ChildRef { id: ChunkId { ctg: CTG_GGFR, cno: 1 }, chid: 0 },
+            ChildRef { id: ChunkId { ctg: CTG_GGST, cno: 1 }, chid: 1 },
+        ],
+        name: None,
+    });
+    cfl.chunk_data.insert((CTG_SCEN, 1), scenh.to_vec());
+
+    // ── GST rollcall: 12b empty string table (cbExtra=28=MACTRF size) ───────
+    let mut gst = [0u8; 12];
+    gst[0..4].copy_from_slice(&28u32.to_le_bytes()); // cbExtra = SIZEOF(MACTRF)
+    gst[4..8].copy_from_slice(&0u32.to_le_bytes());  // istnMac = 0
+    gst[8..10].copy_from_slice(&1u16.to_le_bytes()); // bo = LE
+    gst[10..12].copy_from_slice(&0u16.to_le_bytes()); // osk
+    cfl.chunks.push(ChunkEntry {
+        id: ChunkId { ctg: CTG_GST, cno: 1 },
+        fp: 0, cb: 12,
+        flags: ChunkFlags::NONE, child_count: 0, ref_count: 0, rti: 0,
+        children: vec![], name: None,
+    });
+    cfl.chunk_data.insert((CTG_GST, 1), gst.to_vec());
+
+    // ── MVIE: 8b MFP (bo=1, osk=0, dver._swCur=2=kcvnCur, _swBack=1=kcvnMin)
+    let mut mfp = [0u8; 8];
+    mfp[0..2].copy_from_slice(&1i16.to_le_bytes()); // bo = kboCur = 1
+    mfp[2..4].copy_from_slice(&0i16.to_le_bytes()); // osk = 0
+    mfp[4..6].copy_from_slice(&2i16.to_le_bytes()); // dver._swCur = kcvnCur = 2
+    mfp[6..8].copy_from_slice(&1i16.to_le_bytes()); // dver._swBack = kcvnMin = 1
+    cfl.chunks.push(ChunkEntry {
+        id: ChunkId { ctg: CTG_MVIE, cno: 1 },
+        fp: 0, cb: 8,
+        flags: ChunkFlags::NONE, child_count: 2, ref_count: 0, rti: 0,
+        children: vec![
+            ChildRef { id: ChunkId { ctg: CTG_GST,  cno: 1 }, chid: 0 }, // rollcall chid=0
+            ChildRef { id: ChunkId { ctg: CTG_SCEN, cno: 1 }, chid: 0 }, // scene chid=0
+        ],
+        name: None,
+    });
+    cfl.chunk_data.insert((CTG_MVIE, 1), mfp.to_vec());
+
+    // Write to disk
+    let bytes = cfl.to_bytes_passthrough().map_err(|e| e.to_string())?;
+    std::fs::write(&path, &bytes).map_err(|e| format!("Write failed: {e}"))?;
+
+    // Parse scene list (1 scene, 0 actors, 0 frames)
+    let pb = std::path::PathBuf::from(&path);
+    let file_name = pb.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+
+    let info = MovieInfo {
+        path: path.clone(),
+        file_name,
+        scene_count: 1,
+        total_frames: 0,
+    };
+    let scenes = vec![SceneInfo { scene_idx: 0, frame_count: 0, actor_count: 0 }];
+
+    *state.loaded_file.lock().unwrap() = Some(LoadedFile {
+        path: pb,
+        cfl,
+        movie_info: info.clone(),
+        scenes,
+    });
+
+    Ok(info)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

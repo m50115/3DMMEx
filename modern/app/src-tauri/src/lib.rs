@@ -26,6 +26,7 @@ pub fn run() {
             commands::list_templates,
             commands::add_actor,
             commands::remove_actor,
+            commands::create_movie,
         ])
         .run(tauri::generate_context!())
         .expect("error running 3DMMEx application");

@@ -59,6 +59,10 @@ pub const CTG_GLLT: u32 = u32::from_be_bytes(*b"GLLT");
 pub const CTG_PATH: u32 = u32::from_be_bytes(*b"PATH");
 /// GG of actor events.
 pub const CTG_GGAE: u32 = u32::from_be_bytes(*b"GGAE");
+/// GG of frame-level scene events (kctgFrmGg). Child of SCEN with chid=0.
+pub const CTG_GGFR: u32 = u32::from_be_bytes(*b"GGFR");
+/// GG of start-of-scene events (kctgStartGg). Child of SCEN with chid=1.
+pub const CTG_GGST: u32 = u32::from_be_bytes(*b"GGST");
 /// Three-D Text chunk — child of TMPL. Contains TDTF (24b): bo+osk+tdts+tagTdf.
 /// tagTdf is a TAGF pointing to a TDF font chunk in tdfs.3cn.
 pub const CTG_TDT: u32 = u32::from_be_bytes(*b"TDT ");

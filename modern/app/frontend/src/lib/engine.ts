@@ -104,3 +104,10 @@ export async function addActor(
 export async function removeActor(sceneIdx: number, actorIdx: number): Promise<void> {
   return invoke<void>("remove_actor", { sceneIdx, actorIdx });
 }
+
+// ── Phase 7e — Create movie from scratch ─────────────────────────────────
+
+/** Create a new empty .3mm at `path`, load it, return MovieInfo. */
+export async function createMovie(path: string): Promise<MovieInfo> {
+  return invoke<MovieInfo>("create_movie", { path });
+}

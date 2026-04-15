@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
-import { openFile, getSceneList, listSounds, playSound, getSceneActors, updateActorPosition, updateActorFrameRange, updateActorOrientation, saveFile, listTemplates, addActor, removeActor } from "../lib/engine";
+import { openFile, getSceneList, listSounds, playSound, getSceneActors, updateActorPosition, updateActorFrameRange, updateActorOrientation, saveFile, listTemplates, addActor, removeActor, createMovie } from "../lib/engine";
 import type { MovieInfo, SceneInfo, SoundEntry, ActorInfo, TemplateInfo } from "../lib/types";
 import { Timeline } from "./Timeline";
 import { Viewport } from "./Viewport";
@@ -137,6 +137,34 @@ export function Studio() {
 
       setFrameLoading(true);
       setFrameSrc(streamUrl(0, 0)); // onLoad/onError handlers clear frameLoading
+    } catch (err) {
+      setStatusMsg(`Error: ${err}`);
+    }
+  }, []);
+
+  const handleNewMovie = useCallback(async () => {
+    const savePath = await saveDialog({
+      filters: [{ name: "3D Movie Maker", extensions: ["3mm"] }],
+      defaultPath: "untitled.3mm",
+    });
+    if (!savePath) return;
+
+    setPlaying(false);
+    setCurrentFrame(0);
+    setStatusMsg("Creating…");
+    setFrameSrc(null);
+    setFrameError(null);
+    setActors([]);
+    setSelectedActorIdx(null);
+
+    try {
+      const info = await createMovie(savePath);
+      setMovie(info);
+      setScenes([{ scene_idx: 0, frame_count: 0, actor_count: 0 }]);
+      setActiveScene(0);
+      setStatusMsg(`Created: ${info.file_name}`);
+      setSounds([]);
+      setFrameSrc(null); // empty scene — no render yet
     } catch (err) {
       setStatusMsg(`Error: ${err}`);
     }
@@ -307,6 +335,9 @@ export function Studio() {
       {/* ── Toolbar ─────────────────────────────────────────────── */}
       <div className="toolbar">
         <span className="toolbar-title">3DMMEx</span>
+        <button className="btn-secondary" onClick={handleNewMovie}>
+          New Movie
+        </button>
         <button className="btn-primary" onClick={handleOpenFile}>
           Open .3mm
         </button>
