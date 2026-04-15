@@ -22,6 +22,21 @@ function loadStoredResolution(): ResolutionKey {
   return "480p";
 }
 
+// ── Theme ────────────────────────────────────────────────────────────────────
+
+type Theme = "light" | "dark";
+
+function loadStoredTheme(): Theme {
+  const stored = localStorage.getItem("dmmex.theme");
+  if (stored === "light" || stored === "dark") return stored;
+  if (window.matchMedia("(prefers-color-scheme: light)").matches) return "light";
+  return "dark";
+}
+
+function applyTheme(theme: Theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+}
+
 /** Build a stream:// URL for a given scene/frame. Cache-bust with timestamp.
  *  frame is 0-indexed in frontend; backend expects 1-indexed (3DMM convention).
  *  w/h are optional path segments; backend defaults to 640×480 if omitted. */
@@ -51,6 +66,20 @@ export function Studio() {
   const [playing, setPlaying] = useState(false);
   const [fps, setFps] = useState<number | null>(null);
   const [resKey, setResKey] = useState<ResolutionKey>(loadStoredResolution);
+  const [theme, setTheme] = useState<Theme>(() => {
+    const t = loadStoredTheme();
+    applyTheme(t);
+    return t;
+  });
+
+  const handleThemeToggle = useCallback(() => {
+    setTheme((prev) => {
+      const next: Theme = prev === "dark" ? "light" : "dark";
+      localStorage.setItem("dmmex.theme", next);
+      applyTheme(next);
+      return next;
+    });
+  }, []);
 
   // Derived viewport dimensions from the selected resolution preset.
   const resPreset = RESOLUTIONS.find(r => r.key === resKey) ?? RESOLUTIONS[0];
@@ -396,6 +425,13 @@ export function Studio() {
             <option key={r.key} value={r.key}>{r.label}</option>
           ))}
         </select>
+        <button
+          className="theme-toggle-btn"
+          onClick={handleThemeToggle}
+          title="Toggle light/dark theme"
+        >
+          {theme === "dark" ? "🌙" : "☀️"}
+        </button>
         {movie && (
           <span className="toolbar-info">
             {movie.file_name} · {movie.scene_count} scenes · {movie.total_frames} frames

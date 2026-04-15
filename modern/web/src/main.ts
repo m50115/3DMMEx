@@ -52,12 +52,46 @@ let thumbGenId = 0;
 
 async function bootstrap() {
   await init();
+  setupThemeToggle();
   setupResolutionSelector();
   setupDropzone();
   setupFileInput();
   setupDownload();
   setupContentFiles();
   setupSceneTextToggle();
+}
+
+// ── Theme toggle ──────────────────────────────────────────────────────────────
+
+type Theme = 'light' | 'dark';
+
+function applyTheme(theme: Theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = theme === 'dark' ? '🌙' : '☀️';
+}
+
+function setupThemeToggle() {
+  // Determine initial theme: stored → prefers-color-scheme → dark default.
+  const stored = localStorage.getItem('dmmex.theme') as Theme | null;
+  let theme: Theme;
+  if (stored === 'light' || stored === 'dark') {
+    theme = stored;
+  } else if (window.matchMedia('(prefers-color-scheme: light)').matches) {
+    theme = 'light';
+  } else {
+    theme = 'dark';
+  }
+  applyTheme(theme);
+
+  const btn = document.getElementById('theme-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const current = document.documentElement.getAttribute('data-theme') as Theme;
+    const next: Theme = current === 'light' ? 'dark' : 'light';
+    localStorage.setItem('dmmex.theme', next);
+    applyTheme(next);
+  });
 }
 
 function setupResolutionSelector() {
