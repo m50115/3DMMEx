@@ -6,6 +6,7 @@ members = [
     "crates/renderer",
     "crates/audio",
     "crates/cli",
+    "crates/wasm-bindings",
     "app/src-tauri",
 ]
 
