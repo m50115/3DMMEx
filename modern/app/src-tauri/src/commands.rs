@@ -780,9 +780,9 @@ pub fn get_scene_actors(
     let mut actors = Vec::new();
     for (idx, child) in scen.children.iter().filter(|c| c.id.ctg == CTG_ACTR).enumerate() {
         let cno = child.id.cno;
-        let raw = match lf.cfl.chunk_data.get(&(CTG_ACTR, cno)) {
-            Some(d) => d,
-            None => continue,
+        let raw = match lf.cfl.get_chunk_data(CTG_ACTR, cno) {
+            Ok(d) => d,
+            Err(_) => continue,
         };
         if raw.len() < ActorOnFile::SIZE { continue; }
 
@@ -875,25 +875,31 @@ pub fn update_actor_position(
             .id.cno
     };
 
-    let raw = lf.cfl.chunk_data
-        .get(&(CTG_ACTR, actr_cno))
-        .ok_or_else(|| format!("ACTR chunk cno={actr_cno} not in chunk_data"))?
-        .clone();
+    let mut data = lf.cfl
+        .get_chunk_data(CTG_ACTR, actr_cno)
+        .map_err(|e| format!("ACTR cno={actr_cno}: {e}"))?;
 
-    if raw.len() < ActorOnFile::SIZE {
-        return Err(format!("ACTR chunk cno={actr_cno} too small: {} bytes", raw.len()));
+    if data.len() < ActorOnFile::SIZE {
+        return Err(format!("ACTR chunk cno={actr_cno} too small: {} bytes", data.len()));
     }
 
     // Write dxyz_full_rte directly as BRS 16.16 fixed-point i32 at offsets 4-15
-    let mut new_raw = raw;
     let x_fixed = (dx * 65536.0) as i32;
     let y_fixed = (dy * 65536.0) as i32;
     let z_fixed = (dz * 65536.0) as i32;
-    new_raw[4..8].copy_from_slice(&x_fixed.to_le_bytes());
-    new_raw[8..12].copy_from_slice(&y_fixed.to_le_bytes());
-    new_raw[12..16].copy_from_slice(&z_fixed.to_le_bytes());
+    data[4..8].copy_from_slice(&x_fixed.to_le_bytes());
+    data[8..12].copy_from_slice(&y_fixed.to_le_bytes());
+    data[12..16].copy_from_slice(&z_fixed.to_le_bytes());
 
-    lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), new_raw);
+    let new_cb = data.len() as u32;
+    lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), data);
+
+    if let Some(entry) = lf.cfl.chunks.iter_mut()
+        .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == actr_cno)
+    {
+        entry.flags.remove(ChunkFlags::PACKED);
+        entry.cb = new_cb;
+    }
     Ok(())
 }
 
@@ -924,20 +930,27 @@ pub fn update_actor_frame_range(
             .id.cno
     };
 
-    let raw = lf.cfl.chunk_data
-        .get(&(CTG_ACTR, actr_cno))
-        .ok_or_else(|| format!("ACTR chunk cno={actr_cno} not in chunk_data"))?
-        .clone();
+    let mut data = lf.cfl
+        .get_chunk_data(CTG_ACTR, actr_cno)
+        .map_err(|e| format!("ACTR cno={actr_cno}: {e}"))?;
 
-    if raw.len() < ActorOnFile::SIZE {
-        return Err(format!("ACTR chunk cno={actr_cno} too small: {} bytes", raw.len()));
+    if data.len() < ActorOnFile::SIZE {
+        return Err(format!("ACTR chunk cno={actr_cno} too small: {} bytes", data.len()));
     }
 
     // nfrm_first=[20..24], nfrm_last=[24..28]
-    let mut new_raw = raw;
-    new_raw[20..24].copy_from_slice(&nfrm_first.to_le_bytes());
-    new_raw[24..28].copy_from_slice(&nfrm_last.to_le_bytes());
-    lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), new_raw);
+    data[20..24].copy_from_slice(&nfrm_first.to_le_bytes());
+    data[24..28].copy_from_slice(&nfrm_last.to_le_bytes());
+
+    let new_cb = data.len() as u32;
+    lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), data);
+
+    if let Some(entry) = lf.cfl.chunks.iter_mut()
+        .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == actr_cno)
+    {
+        entry.flags.remove(ChunkFlags::PACKED);
+        entry.cb = new_cb;
+    }
     Ok(())
 }
 
@@ -981,10 +994,9 @@ pub fn update_actor_orientation(
             .id.cno
     };
 
-    let ggae_raw = lf.cfl.chunk_data
-        .get(&(CTG_GGAE, ggae_cno))
-        .ok_or_else(|| format!("GGAE chunk cno={ggae_cno} not in chunk_data"))?
-        .clone();
+    let ggae_raw = lf.cfl
+        .get_chunk_data(CTG_GGAE, ggae_cno)
+        .map_err(|e| format!("GGAE cno={ggae_cno}: {e}"))?;
 
     let mut gg = GenericGroup::read(&ggae_raw)
         .map_err(|e| format!("Parse GGAE: {e}"))?;
@@ -1016,7 +1028,16 @@ pub fn update_actor_orientation(
         gg.variable_entries.push(new_orient.to_le_bytes().to_vec());
     }
 
-    lf.cfl.chunk_data.insert((CTG_GGAE, ggae_cno), gg.write());
+    let written = gg.write();
+    let new_cb = written.len() as u32;
+    lf.cfl.chunk_data.insert((CTG_GGAE, ggae_cno), written);
+
+    if let Some(entry) = lf.cfl.chunks.iter_mut()
+        .find(|c| c.id.ctg == CTG_GGAE && c.id.cno == ggae_cno)
+    {
+        entry.flags.remove(ChunkFlags::PACKED);
+        entry.cb = new_cb;
+    }
     Ok(())
 }
 
