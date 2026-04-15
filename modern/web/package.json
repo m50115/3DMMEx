@@ -1,0 +1,17 @@
+{
+  "name": "dmmex-web",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "wasm": "cd ../crates/wasm-bindings && CARGO_TARGET_DIR=/Users/devuser/www/assets/3dmmex-wasm-build wasm-pack build --target web --out-dir ../../web/pkg"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "vite-plugin-wasm": "^3.3.0",
+    "vite-plugin-top-level-await": "^1.4.4",
+    "typescript": "^5.4.0"
+  }
+}

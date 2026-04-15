@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3DMMEx Web</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      background: #1a1a1a;
+      color: #eee;
+      min-height: 100vh;
+    }
+    h1 { margin: 0; padding: 0.75rem 1rem; font-size: 1.1rem; background: #111; border-bottom: 1px solid #333; }
+    #drop {
+      border: 2px dashed #555;
+      padding: 3rem 2rem;
+      margin: 2rem;
+      text-align: center;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    #drop.hover { border-color: #6cf; background: #1e2a33; }
+    #drop p { margin: 0.5rem 0 0; color: #888; font-size: 0.85rem; }
+    #layout {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      gap: 1rem;
+      padding: 1rem;
+      height: calc(100vh - 46px);
+    }
+    #sidebar { display: flex; flex-direction: column; gap: 1rem; overflow: auto; }
+    #scenes-panel, #actors-panel {
+      background: #222;
+      border-radius: 6px;
+      padding: 0.75rem;
+    }
+    #scenes-panel h2, #actors-panel h2 {
+      margin: 0 0 0.5rem;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #999;
+    }
+    .scene-row {
+      padding: 6px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    .scene-row:hover { background: #333; }
+    .scene-row.active { background: #2a3f55; color: #6cf; }
+    .actor-row { padding: 3px 4px; font-size: 0.8rem; color: #aaa; }
+    #main-area { display: flex; flex-direction: column; gap: 0.75rem; }
+    canvas {
+      background: #000;
+      display: block;
+      border-radius: 4px;
+      border: 1px solid #333;
+    }
+    #controls { display: flex; gap: 0.5rem; align-items: center; }
+    button {
+      background: #333;
+      color: #eee;
+      border: 1px solid #555;
+      padding: 5px 14px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    button:hover { background: #444; }
+    #status { font-size: 0.8rem; color: #888; }
+    #error { color: #f88; font-size: 0.85rem; padding: 0.5rem; background: #2a1515; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>3DMMEx Web</h1>
+  <div id="drop">
+    <strong>Arrastra un archivo .3mm aquí</strong>
+    <p>o haz click para seleccionar</p>
+    <input type="file" id="file-input" accept=".3mm" style="display:none" />
+  </div>
+  <div id="layout" style="display:none">
+    <div id="sidebar">
+      <div id="scenes-panel">
+        <h2>Escenas</h2>
+        <div id="scenes"></div>
+      </div>
+      <div id="actors-panel">
+        <h2>Actores</h2>
+        <div id="actors"></div>
+      </div>
+    </div>
+    <div id="main-area">
+      <canvas id="viewport" width="640" height="480"></canvas>
+      <div id="controls">
+        <button id="download">&#128190; Descargar .3mm</button>
+        <span id="status"></span>
+      </div>
+      <div id="error" style="display:none"></div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
