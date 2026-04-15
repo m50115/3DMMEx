@@ -54,6 +54,20 @@
     .scene-row:hover { background: #333; }
     .scene-row.active { background: #2a3f55; color: #6cf; }
     .actor-row { padding: 3px 4px; font-size: 0.8rem; color: #aaa; }
+    #content-panel {
+      background: #222;
+      border-radius: 6px;
+      padding: 0.75rem;
+    }
+    #content-panel h2 {
+      margin: 0 0 0.5rem;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #999;
+    }
+    #tmpls-status { font-size: 0.8rem; color: #888; margin-bottom: 0.5rem; }
+    #tmpls-status.loaded { color: #6f6; }
     #main-area { display: flex; flex-direction: column; gap: 0.75rem; }
     canvas {
       background: #000;
@@ -92,6 +106,12 @@
       <div id="actors-panel">
         <h2>Actores</h2>
         <div id="actors"></div>
+      </div>
+      <div id="content-panel">
+        <h2>Archivos de contenido</h2>
+        <div id="tmpls-status">tmpls.3cn: no cargado</div>
+        <button id="load-tmpls-btn">Cargar tmpls.3cn…</button>
+        <input type="file" id="tmpls-input" accept=".3cn" style="display:none" />
       </div>
     </div>
     <div id="main-area">

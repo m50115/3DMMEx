@@ -34,6 +34,7 @@ async function bootstrap() {
   setupDropzone();
   setupFileInput();
   setupDownload();
+  setupContentFiles();
 }
 
 // ── Drop zone ────────────────────────────────────────────────────────────────
@@ -143,6 +144,33 @@ async function renderFrame() {
   } catch (err) {
     showError(`Render error: ${err}`);
   }
+}
+
+// ── Content files (tmpls.3cn) ─────────────────────────────────────────────────
+
+function setupContentFiles() {
+  const btn = document.getElementById('load-tmpls-btn')!;
+  const input = document.getElementById('tmpls-input') as HTMLInputElement;
+
+  btn.addEventListener('click', () => input.click());
+  input.addEventListener('change', async () => {
+    const file = input.files?.[0];
+    if (!file || !engine) return;
+    setStatus(`Cargando ${file.name}…`);
+    clearError();
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    try {
+      engine.load_content_file(bytes);
+      const statusEl = document.getElementById('tmpls-status')!;
+      statusEl.textContent = `${file.name}: cargado ✓`;
+      statusEl.classList.add('loaded');
+      setStatus(`Listo. Re-renderizando…`);
+      await renderFrame();
+      setStatus(`${file.name} cargado — render actualizado`);
+    } catch (err) {
+      showError(`Error cargando ${file.name}: ${err}`);
+    }
+  });
 }
 
 // ── Download ──────────────────────────────────────────────────────────────────

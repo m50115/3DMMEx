@@ -49,6 +49,7 @@ struct ActorInfo {
 /// Usage:
 /// ```js
 /// const engine = WasmEngine.open_file(bytes);
+/// engine.load_content_file(tmplsBytes); // optional: enables external-template actors
 /// const scenes = engine.get_scene_list();
 /// const actors = engine.get_scene_actors(0);
 /// const bmp = await engine.render_frame(0, 1, 640, 480); // async
@@ -59,6 +60,9 @@ struct ActorInfo {
 pub struct WasmEngine {
     cfl: ChunkyFile,
     scenes: Vec<SceneInfo>,
+    /// Optional external content file (tmpls.3cn). When loaded, actors whose
+    /// TMPL chunk lives in this file (sid > 0) can be rendered.
+    tmpls: Option<ChunkyFile>,
     /// Lazy-initialized GPU renderer. `None` until first `render_frame` call.
     /// `None` also when WebGPU is unavailable in the browser.
     renderer: Option<HeadlessRenderer>,
@@ -78,7 +82,25 @@ impl WasmEngine {
 
         let scenes = build_scene_list(&cfl);
 
-        Ok(WasmEngine { cfl, scenes, renderer: None })
+        Ok(WasmEngine { cfl, scenes, tmpls: None, renderer: None })
+    }
+
+    /// Load an external content file (e.g. `tmpls.3cn`) from raw bytes.
+    ///
+    /// Once loaded, actors whose templates live in this file (sid > 0) will
+    /// be included in subsequent `render_frame` calls.
+    /// Safe to call multiple times — replaces the previously loaded file.
+    #[wasm_bindgen]
+    pub fn load_content_file(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
+        let mut cursor = Cursor::new(bytes);
+        let cfl = ChunkyFile::read(&mut cursor)
+            .map_err(|e| JsValue::from_str(&format!("Content file parse error: {e}")))?;
+        self.tmpls = Some(cfl);
+        // Clear mesh cache so external models are re-uploaded on next render.
+        if let Some(r) = &mut self.renderer {
+            r.clear_mesh_cache();
+        }
+        Ok(())
     }
 
     /// Return an array of `{ scene_idx, frame_count, actor_count }` objects.
@@ -120,14 +142,18 @@ impl WasmEngine {
         }
         let r = self.renderer.as_mut().unwrap();
 
-        // Build render entries: (ctg, cno, transform) for sid=0 local BMDLs.
-        let entries = build_scene_entries(&self.cfl, scene_idx, frame);
+        // Build render entries: (key, transform). Resolves sid=0 local BMDLs
+        // and, when tmpls is loaded, sid>0 external templates.
+        let entries = build_scene_entries(&self.cfl, self.tmpls.as_ref(), scene_idx, frame);
 
         // Ensure each model is uploaded to the GPU mesh cache.
+        // Try local file first, then external content file.
         for (key, _) in &entries {
             if !r.has_mesh(*key) {
-                if let Some(model) = load_local_model(&self.cfl, *key) {
-                    r.ensure_mesh(*key, &model);
+                let model = load_model_from(&self.cfl, *key)
+                    .or_else(|| self.tmpls.as_ref().and_then(|t| load_model_from(t, *key)));
+                if let Some(m) = model {
+                    r.ensure_mesh(*key, &m);
                 }
             }
         }
@@ -207,13 +233,14 @@ pub fn parse_movie_info(bytes: &[u8]) -> Result<JsValue, JsValue> {
 
 /// Build render entries for a scene frame.
 ///
-/// Returns `Vec<((ctg, cno), world_transform)>` for sid=0 actors whose BMDL
-/// lives in the movie file itself. External-template actors (sid > 0) are
-/// silently skipped — they require tmpls.3cn (Ph8a.3).
+/// Returns `Vec<((ctg, cno), world_transform)>`. Resolves:
+/// - sid=0 actors: TMPL + BMDL from `cfl` (the .3mm file itself)
+/// - sid>0 actors: TMPL from `tmpls` (tmpls.3cn), BMDL also from `tmpls`
 ///
-/// TODO Ph8a.3: extract to engine::scene_resolver and handle sid>0 external.
+/// TODO Ph8a.3 follow-up: extract to engine::scene_resolver when a third caller appears.
 fn build_scene_entries(
     cfl: &ChunkyFile,
+    tmpls: Option<&ChunkyFile>,
     scene_idx: usize,
     frame: i32,
 ) -> Vec<((u32, u32), Mat4)> {
@@ -250,24 +277,38 @@ fn build_scene_entries(
             continue;
         }
 
-        // Only TMPL actors whose template chunk is in the movie file itself (sid=0).
+        // Only TMPL actors (direct BMDL refs skipped for MVP).
         if actf.tag_tmpl.ctg != CTG_TMPL {
-            continue; // direct BMDL refs — skip for MVP
+            continue;
         }
         let tmpl_cno = actf.tag_tmpl.cno;
-        let tmpl = match cfl.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == tmpl_cno)
-        {
-            Some(t) => t,
-            None => continue, // sid>0 external TMPL — skip until Ph8a.3
-        };
 
-        // Collect local BMDL keys from the TMPL children.
-        let bmdl_keys: Vec<(u32, u32)> = tmpl
-            .children
-            .iter()
-            .filter(|ch| ch.id.ctg == CTG_BMDL)
-            .map(|ch| (CTG_BMDL, ch.id.cno))
-            .collect();
+        // Resolve TMPL: try local cfl first (sid=0), then external tmpls (sid>0).
+        let bmdl_keys: Vec<(u32, u32)> = if let Some(tmpl) =
+            cfl.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == tmpl_cno)
+        {
+            // Local TMPL — BMDL data in cfl.
+            tmpl.children
+                .iter()
+                .filter(|ch| ch.id.ctg == CTG_BMDL)
+                .map(|ch| (CTG_BMDL, ch.id.cno))
+                .collect()
+        } else if let Some(tmpls_cfl) = tmpls {
+            // External TMPL (sid>0) — BMDL data in tmpls.3cn.
+            if let Some(tmpl) =
+                tmpls_cfl.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == tmpl_cno)
+            {
+                tmpl.children
+                    .iter()
+                    .filter(|ch| ch.id.ctg == CTG_BMDL)
+                    .map(|ch| (CTG_BMDL, ch.id.cno))
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![] // tmpls.3cn not loaded yet — skip external actor
+        };
         if bmdl_keys.is_empty() {
             continue;
         }
@@ -365,8 +406,8 @@ fn build_scene_entries(
     entries
 }
 
-/// Load a BMDL model from the movie file's own chunks.
-fn load_local_model(cfl: &ChunkyFile, key: (u32, u32)) -> Option<Model> {
+/// Load a BMDL model from the given ChunkyFile.
+fn load_model_from(cfl: &ChunkyFile, key: (u32, u32)) -> Option<Model> {
     let data = cfl.get_chunk_data(key.0, key.1).ok()?;
     Model::from_bytes(&data).ok()
 }
