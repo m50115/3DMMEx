@@ -45,6 +45,59 @@
       letter-spacing: 0.05em;
       color: #999;
     }
+    /* ── Scene thumbnail gallery ─────────────────────────────────── */
+    #scene-thumbs {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, 160px);
+      gap: 8px;
+      margin-bottom: 0.75rem;
+    }
+    .scene-thumb-card {
+      cursor: pointer;
+      border-radius: 5px;
+      overflow: hidden;
+      border: 2px solid #333;
+      transition: border-color 0.15s;
+      background: #111;
+    }
+    .scene-thumb-card:hover { border-color: #6cf; }
+    .scene-thumb-card.active { border-color: #6cf; box-shadow: 0 0 0 1px #6cf; }
+    .scene-thumb-card img {
+      display: block;
+      width: 160px;
+      height: 120px;
+      object-fit: cover;
+    }
+    .scene-thumb-card .thumb-placeholder {
+      width: 160px;
+      height: 120px;
+      background: #1a1a1a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #444;
+      font-size: 0.7rem;
+    }
+    .scene-thumb-card .thumb-label {
+      padding: 3px 6px;
+      font-size: 0.75rem;
+      color: #aaa;
+      background: #1a1a1a;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .scene-thumb-card.active .thumb-label { color: #6cf; }
+    /* ── Scene text list (accessibility fallback) ────────────────── */
+    #scenes-text-toggle {
+      font-size: 0.75rem;
+      color: #666;
+      cursor: pointer;
+      margin-bottom: 4px;
+      user-select: none;
+    }
+    #scenes-text-toggle:hover { color: #999; }
+    #scenes-text-list { display: none; }
     .scene-row {
       padding: 6px 8px;
       border-radius: 4px;
@@ -115,7 +168,11 @@
     <div id="sidebar">
       <div id="scenes-panel">
         <h2>Escenas</h2>
-        <div id="scenes"></div>
+        <div id="scene-thumbs"></div>
+        <div id="scenes-text-toggle">▶ lista de texto</div>
+        <div id="scenes-text-list">
+          <div id="scenes"></div>
+        </div>
       </div>
       <div id="actors-panel">
         <h2>Actores</h2>

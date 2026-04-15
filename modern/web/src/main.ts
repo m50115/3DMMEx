@@ -27,6 +27,11 @@ let engine: WasmEngine | null = null;
 let currentScene = 0;
 let currentFileName = 'movie.3mm';
 
+/** Cached Blob URLs for scene thumbnails. Revoked on new movie load. */
+const thumbCache = new Map<number, string>();
+/** Abort flag — set to true when a new movie is loaded to cancel in-flight thumb generation. */
+let thumbGenId = 0;
+
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
 async function bootstrap() {
@@ -35,6 +40,17 @@ async function bootstrap() {
   setupFileInput();
   setupDownload();
   setupContentFiles();
+  setupSceneTextToggle();
+}
+
+function setupSceneTextToggle() {
+  const toggle = document.getElementById('scenes-text-toggle')!;
+  const list = document.getElementById('scenes-text-list')!;
+  toggle.addEventListener('click', () => {
+    const visible = list.style.display !== 'none';
+    list.style.display = visible ? 'none' : 'block';
+    toggle.textContent = (visible ? '▶' : '▼') + ' lista de texto';
+  });
 }
 
 // ── Drop zone ────────────────────────────────────────────────────────────────
@@ -70,6 +86,9 @@ async function loadFile(file: File) {
   setStatus(`Parsing ${file.name}…`);
   clearError();
 
+  // Revoke stale thumbnail Blob URLs from the previous movie.
+  revokeAllThumbs();
+
   const bytes = new Uint8Array(await file.arrayBuffer());
   try {
     engine = WasmEngine.open_file(bytes);
@@ -82,8 +101,12 @@ async function loadFile(file: File) {
   document.getElementById('layout')!.style.display = 'grid';
 
   renderSceneList();
+  renderThumbGrid();
   selectScene(0);
   setStatus(`Loaded: ${file.name} — ${engine.chunk_count()} chunks`);
+
+  // Kick off async thumbnail generation (does not block UI).
+  generateAllThumbs();
 }
 
 // ── Scene list ────────────────────────────────────────────────────────────────
@@ -109,8 +132,80 @@ function selectScene(idx: number) {
   document.querySelectorAll('.scene-row').forEach((r, i) =>
     r.classList.toggle('active', i === idx)
   );
+  document.querySelectorAll('.scene-thumb-card').forEach((c, i) =>
+    c.classList.toggle('active', i === idx)
+  );
   renderActors();
   renderFrame();
+}
+
+// ── Thumbnail gallery ────────────────────────────────────────────────────────
+
+const THUMB_W = 160;
+const THUMB_H = 120;
+
+/** Revoke all cached Blob URLs and clear the map. */
+function revokeAllThumbs() {
+  thumbGenId++; // invalidate any in-flight generation loop
+  thumbCache.forEach(url => URL.revokeObjectURL(url));
+  thumbCache.clear();
+}
+
+/**
+ * Render the placeholder grid immediately (dark cards with scene labels).
+ * Thumbnails are filled in later by generateAllThumbs().
+ */
+function renderThumbGrid() {
+  if (!engine) return;
+  const scenes = engine.get_scene_list() as SceneInfo[];
+  const container = document.getElementById('scene-thumbs')!;
+  container.innerHTML = scenes.map(s => `
+    <div class="scene-thumb-card" data-idx="${s.scene_idx}">
+      <div class="thumb-placeholder" id="thumb-ph-${s.scene_idx}">…</div>
+      <div class="thumb-label">Scene ${s.scene_idx} · ${s.actor_count} actor${s.actor_count !== 1 ? 's' : ''}</div>
+    </div>`).join('');
+
+  container.querySelectorAll<HTMLElement>('.scene-thumb-card').forEach(card => {
+    card.addEventListener('click', () => selectScene(parseInt(card.dataset.idx!)));
+  });
+}
+
+/**
+ * Async loop: render each scene's frame 1 at thumbnail size, cache the Blob URL,
+ * and swap it into the DOM. Aborts if thumbGenId changes (new movie loaded).
+ */
+async function generateAllThumbs() {
+  if (!engine) return;
+  const genId = ++thumbGenId;
+  const scenes = engine.get_scene_list() as SceneInfo[];
+
+  for (const s of scenes) {
+    if (thumbGenId !== genId) return; // new movie loaded — abort
+    if (!engine) return;
+
+    try {
+      const bmp = await engine.render_frame(s.scene_idx, 1, THUMB_W, THUMB_H);
+      if (thumbGenId !== genId) return;
+
+      const blob = new Blob([bmp.slice()], { type: 'image/bmp' });
+      const url = URL.createObjectURL(blob);
+      thumbCache.set(s.scene_idx, url);
+
+      const ph = document.getElementById(`thumb-ph-${s.scene_idx}`);
+      if (ph) {
+        const img = document.createElement('img');
+        img.src = url;
+        img.width = THUMB_W;
+        img.height = THUMB_H;
+        img.alt = `Scene ${s.scene_idx}`;
+        ph.replaceWith(img);
+      }
+    } catch {
+      // Leave the dark placeholder in place — matches existing stream:// graceful failure.
+      const ph = document.getElementById(`thumb-ph-${s.scene_idx}`);
+      if (ph) ph.textContent = '✗';
+    }
+  }
 }
 
 // ── Actor list ────────────────────────────────────────────────────────────────
@@ -192,6 +287,14 @@ function setupContentFiles() {
       setStatus(`Listo. Re-renderizando…`);
       await renderFrame();
       setStatus(`${file.name} cargado — render actualizado`);
+      // Regenerate thumbnails now that external templates are available.
+      revokeAllThumbs();
+      renderThumbGrid();
+      // Re-apply active state after grid rebuild.
+      document.querySelectorAll('.scene-thumb-card').forEach((c, i) =>
+        c.classList.toggle('active', i === currentScene)
+      );
+      generateAllThumbs();
     } catch (err) {
       showError(`Error cargando ${file.name}: ${err}`);
     }
