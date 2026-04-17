@@ -106,7 +106,9 @@
       "Bash(CARGO_TARGET_DIR=/Users/devuser/www/assets/3dmmex-wasm-build wasm-pack build --target web --out-dir ../../web/pkg)",
       "Bash(CARGO_TARGET_DIR=/Users/devuser/www/assets/3dmmex-wasm-build wasm-pack build crates/wasm-bindings --target web --out-dir ../../web/pkg --out-name wasm_bindings)",
       "Bash(grep -n \"tbox\\\\|TBOX\\\\|text.*bubble\\\\|speech\\\\|bubble\\\\|TextBox\\\\|text_box\" /Users/devuser/www/3DMMEx/modern/app/src-tauri/src/commands.rs /Users/devuser/www/3DMMEx/modern/crates/engine/src/*.rs)",
-      "Skill(commit-commands:commit)"
+      "Skill(commit-commands:commit)",
+      "Bash(git push *)",
+      "Bash(git remote *)"
     ]
   }
 }
