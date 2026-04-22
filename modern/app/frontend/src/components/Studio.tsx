@@ -124,7 +124,14 @@ export function Studio() {
       while (active && playingRef.current) {
         f += 1;
         if (f >= scene.frame_count) {
-          if (active) { setCurrentFrame(scene.frame_count - 1); setPlaying(false); }
+          const nextSceneIdx = activeScene + 1;
+          if (active && nextSceneIdx < scenes.length) {
+            setActiveScene(nextSceneIdx);
+            setCurrentFrame(0);
+          } else if (active) {
+            setCurrentFrame(scene.frame_count - 1);
+            setPlaying(false);
+          }
           return;
         }
         if (active) setCurrentFrame(f);
