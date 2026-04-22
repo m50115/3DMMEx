@@ -20,13 +20,42 @@ use engine::fixedpoint::FixedAngle;
 use engine::model::Model;
 use engine::msnd::MovieSound;
 use chunky_format::cfl::{ChunkyHeader, CTG_CREATOR_3DMM, MAGIC_CHUNKY, VERSION_BACK, VERSION_CURRENT};
-use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_GGFR, CTG_GGST, CTG_GST, CTG_MSND, CTG_MVIE, CTG_PATH, CTG_SCEN, CTG_TDF, CTG_TDT, CTG_TMPL, CTG_WAVE};
+use engine::background::BrCamera;
+use engine::tag::{CTG_ACTR, CTG_BKGD, CTG_BMDL, CTG_CAM, CTG_GGAE, CTG_GGFR, CTG_GGST, CTG_GST, CTG_MSND, CTG_MVIE, CTG_PATH, CTG_SCEN, CTG_TDF, CTG_TDT, CTG_TMPL, CTG_WAVE};
+use renderer::camera::Camera;
 use engine::tdf::BrTdf;
 use engine::tdt::{BrTdt, Tdts};
 use engine::transform::RoutePoint;
 use renderer::convert::orient_to_rotation_mat4;
 
 use crate::state::{AppState, LoadedFile};
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Convert a BRender CAM chunk into a renderer Camera.
+/// Row 2 of bmat34 = forward direction; row 1 = up; row 3 = position (all BRS).
+fn br_camera_to_camera(br_cam: &BrCamera) -> Camera {
+    let pos = br_cam.bmat34.translation_f32();
+    let fwd = br_cam.bmat34.forward_f32();
+    let up_raw = [
+        br_cam.bmat34.m[1][0].0 as f32 / 65536.0,
+        br_cam.bmat34.m[1][1].0 as f32 / 65536.0,
+        br_cam.bmat34.m[1][2].0 as f32 / 65536.0,
+    ];
+
+    let position = glam::Vec3::from_array(pos);
+    let forward  = glam::Vec3::from_array(fwd);
+    let up_vec   = glam::Vec3::from_array(up_raw);
+
+    let target = position + if forward.length_squared() > 1e-6 { forward.normalize() } else { glam::Vec3::NEG_Z };
+    let up     = if up_vec.length_squared() > 1e-6 { up_vec.normalize() } else { glam::Vec3::Y };
+
+    let fov_y = br_cam.fov_radians().clamp(0.01, std::f32::consts::PI - 0.01);
+    let near  = br_cam.hither_f32().max(0.001);
+    let far   = br_cam.yon_f32().max(near + 0.1);
+
+    Camera { position, target, up, fov_y, near, far, aspect: 1.0 }
+}
 
 // ── Public types returned to the frontend ─────────────────────────────────
 
@@ -84,6 +113,14 @@ pub fn open_file(path: String, state: State<AppState>) -> Result<MovieInfo, Stri
             let mut r = BufReader::new(f);
             if let Ok(cf) = ChunkyFile::read(&mut r) {
                 *state.tdfs.lock().unwrap() = Some(Arc::new(cf));
+            }
+        }
+        // Pre-parse bkgds.3cn — provides BrCamera for each BKGD/CAM chunk.
+        let bkgds_path = content_dir.join("bkgds.3cn");
+        if let Ok(f) = std::fs::File::open(&bkgds_path) {
+            let mut r = BufReader::new(f);
+            if let Ok(cf) = ChunkyFile::read(&mut r) {
+                *state.bkgds.lock().unwrap() = Some(Arc::new(cf));
             }
         }
         // Invalidate GPU mesh cache — new file means new geometry.
@@ -312,7 +349,8 @@ pub(crate) fn render_to_rgba(
     // local_bmdls = pre-extracted BMDL (ctg,cno) keys from lf.cfl for sid=0 non-TDT actors.
     // Extracted while holding the loaded_file lock so Step 2 needs no re-lock.
     // Tuple: (ctg, cno, sid, transform, tdt_data, local_bmdls)
-    let tag_tmpls: Vec<(u32, u32, i32, glam::Mat4, Option<(u32, Tdts, String)>, Vec<(u32,u32)>)> = {
+    // Also returns bkgd_cno extracted from the GGST start-of-scene events.
+    let (tag_tmpls, bkgd_cno): (Vec<(u32, u32, i32, glam::Mat4, Option<(u32, Tdts, String)>, Vec<(u32,u32)>)>, Option<u32>) = {
         let guard = state.loaded_file.lock().unwrap();
         let lf = guard.as_ref().ok_or("No file loaded")?;
 
@@ -320,6 +358,26 @@ pub(crate) fn render_to_rgba(
             .filter(|c| c.id.ctg == CTG_SCEN)
             .nth(scene_idx)
             .ok_or_else(|| format!("Scene index {scene_idx} out of range"))?;
+
+        // Extract BKGD cno from GGST (start-of-scene events, chid=1).
+        // The sevtSetBkgd entry (sevt==4) carries a 16-byte TagOnFile: {sid,pcrf,ctg,cno}.
+        let bkgd_cno: Option<u32> = scen_chunk.children.iter()
+            .find(|ch| ch.id.ctg == CTG_GGST)
+            .and_then(|ggst_ref| lf.cfl.get_chunk_data(ggst_ref.id.ctg, ggst_ref.id.cno).ok())
+            .and_then(|raw| GenericGroup::read(&raw).ok())
+            .and_then(|gg| {
+                // SEV fixed entry: {nfrm: i32, sevt: i32} = 8 bytes; sevtSetBkgd == 4
+                gg.fixed_entries.iter().zip(gg.variable_entries.iter())
+                    .find(|(fe, _)| fe.len() >= 8 && i32::from_le_bytes(fe[4..8].try_into().unwrap()) == 4)
+                    .and_then(|(_, ve)| {
+                        // Variable = TagOnFile: [sid:4][pcrf:4][ctg:4][cno:4] = 16 bytes
+                        if ve.len() >= 16 {
+                            Some(u32::from_le_bytes(ve[12..16].try_into().unwrap()))
+                        } else {
+                            None
+                        }
+                    })
+            });
 
         let mut tags = Vec::new();
         for child in scen_chunk.children.iter().filter(|c| c.id.ctg == CTG_ACTR) {
@@ -441,12 +499,23 @@ pub(crate) fn render_to_rgba(
                 tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, sid, translation * rotation, tdt_data, local_bmdls));
             }
         }
-        tags
+        (tags, bkgd_cno)
     };
 
     if tag_tmpls.is_empty() {
         return Err("No actors with valid templates".to_string());
     }
+
+    // --- Step 1b: resolve BKGD camera from bkgds.3cn -----------------------
+    // If we extracted a BKGD cno, look up its CAM child and build a Camera.
+    let scene_camera: Option<Camera> = bkgd_cno.and_then(|cno| {
+        let bkgds = state.bkgds.lock().unwrap().clone()?;
+        let bkgd_chunk = bkgds.chunks.iter().find(|c| c.id.ctg == CTG_BKGD && c.id.cno == cno)?;
+        let cam_ref = bkgd_chunk.children.iter().find(|ch| ch.id.ctg == CTG_CAM)?;
+        let cam_data = bkgds.get_chunk_data(CTG_CAM, cam_ref.id.cno).ok()?;
+        let br_cam = BrCamera::from_bytes(&cam_data).ok()?;
+        Some(br_camera_to_camera(&br_cam))
+    });
 
     // --- Step 2: look up cached tmpls.3cn + GPU renderer ---------------------
     let tmpls = state.tmpls.lock().unwrap().clone()
@@ -627,7 +696,7 @@ pub(crate) fn render_to_rgba(
     }
 
     // --- Step 3: GPU render --------------------------------------------------
-    let rgba = gpu.render_scene(&scene_entries, width, height);
+    let rgba = gpu.render_scene(&scene_entries, width, height, scene_camera);
     if rgba.is_empty() {
         return Err("Render produced empty output".into());
     }

@@ -311,6 +311,7 @@ impl HeadlessRenderer {
         models: &[((u32, u32), Mat4)],
         width: u32,
         height: u32,
+        camera_override: Option<Camera>,
     ) -> Vec<u8> {
         // Collect only cached entries.
         let entries: Vec<((u32, u32), Mat4)> = models
@@ -359,12 +360,18 @@ impl HeadlessRenderer {
             * 0.5;
         let fit_radius = half_diag.max(0.001);
 
-        let mut camera = Camera::new();
-        camera.aspect = width as f32 / height as f32;
-        camera.target = glam::Vec3::new(cx, cy, cz);
-        camera.position = glam::Vec3::new(cx, cy, max_z + fit_radius * 2.0);
-        camera.near = fit_radius * 0.01;
-        camera.far = fit_radius * 20.0;
+        let mut camera = if let Some(mut cam) = camera_override {
+            cam.aspect = width as f32 / height as f32;
+            cam
+        } else {
+            let mut cam = Camera::new();
+            cam.aspect = width as f32 / height as f32;
+            cam.target = glam::Vec3::new(cx, cy, cz);
+            cam.position = glam::Vec3::new(cx, cy, max_z + fit_radius * 2.0);
+            cam.near = fit_radius * 0.01;
+            cam.far = fit_radius * 20.0;
+            cam
+        };
 
         queue.write_buffer(&rp.camera_buf, 0, bytemuck::bytes_of(&camera.to_gpu()));
         queue.write_buffer(&rp.light_buf, 0, bytemuck::bytes_of(&GpuLight::default()));
@@ -547,8 +554,14 @@ impl HeadlessRenderer {
 
     /// Render a scene frame using cached GPU buffers (sync wrapper).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn render_scene(&self, models: &[((u32, u32), Mat4)], width: u32, height: u32) -> Vec<u8> {
-        pollster::block_on(self.render_scene_async(models, width, height))
+    pub fn render_scene(
+        &self,
+        models: &[((u32, u32), Mat4)],
+        width: u32,
+        height: u32,
+        camera_override: Option<Camera>,
+    ) -> Vec<u8> {
+        pollster::block_on(self.render_scene_async(models, width, height, camera_override))
     }
 
     // ── Mesh cache API ────────────────────────────────────────────────────────

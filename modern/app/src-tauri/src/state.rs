@@ -38,6 +38,8 @@ pub struct AppState {
     pub tmpls: Mutex<Option<Arc<ChunkyFile>>>,
     /// Parsed tdfs.3cn — fallback BMDL source for fan-made movies using TDT chunks.
     pub tdfs: Mutex<Option<Arc<ChunkyFile>>>,
+    /// Parsed bkgds.3cn — provides BrCamera for each BKGD chunk.
+    pub bkgds: Mutex<Option<Arc<ChunkyFile>>>,
     /// Headless GPU renderer (None if no GPU adapter found).
     pub gpu: Mutex<Option<HeadlessRenderer>>,
     /// Channel to the dedicated audio thread (None if audio init failed).
@@ -54,6 +56,7 @@ impl AppState {
             loaded_file: Mutex::new(None),
             tmpls: Mutex::new(None),
             tdfs: Mutex::new(None),
+            bkgds: Mutex::new(None),
             gpu: Mutex::new(HeadlessRenderer::try_new()),
             audio_tx: Mutex::new(audio_tx),
         }

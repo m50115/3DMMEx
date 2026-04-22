@@ -159,7 +159,7 @@ impl WasmEngine {
         }
 
         // Render frame.
-        let rgba = r.render_scene_async(&entries, w, h).await;
+        let rgba = r.render_scene_async(&entries, w, h, None).await;
 
         // Encode to BMP for canvas display.
         let bmp = encode_rgba_to_bmp(&rgba, w, h);
