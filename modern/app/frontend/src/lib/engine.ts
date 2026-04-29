@@ -24,8 +24,9 @@ export async function renderSceneFrame(
   frame: number,
   width: number,
   height: number,
+  playAudio = false,
 ): Promise<string> {
-  return invoke<string>("render_scene_frame", { sceneIdx, frame: frame + 1, width, height });
+  return invoke<string>("render_scene_frame", { sceneIdx, frame: frame + 1, width, height, playAudio });
 }
 
 export async function listSounds(): Promise<SoundEntry[]> {

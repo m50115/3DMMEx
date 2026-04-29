@@ -40,8 +40,9 @@ function applyTheme(theme: Theme) {
 /** Build a stream:// URL for a given scene/frame. Cache-bust with timestamp.
  *  frame is 0-indexed in frontend; backend expects 1-indexed (3DMM convention).
  *  w/h are optional path segments; backend defaults to 640×480 if omitted. */
-function streamUrl(scene: number, frame: number, w: number, h: number): string {
-  return `stream://localhost/frame/${scene}/${frame + 1}/${w}/${h}?t=${Date.now()}`;
+function streamUrl(scene: number, frame: number, w: number, h: number, playAudio = false): string {
+  const audioParam = playAudio ? "&playAudio=1" : "";
+  return `stream://localhost/frame/${scene}/${frame + 1}/${w}/${h}?t=${Date.now()}${audioParam}`;
 }
 
 /** Resolve when the img element fires load, reject on error. */
@@ -141,7 +142,7 @@ export function Studio() {
 
         const t0 = performance.now();
         // Set stream:// src — WKWebView fetches it, Rust renders → returns BMP bytes
-        img.src = streamUrl(activeScene, f, vpWRef.current, vpHRef.current);
+        img.src = streamUrl(activeScene, f, vpWRef.current, vpHRef.current, true);
         try {
           await waitForLoad(img);
           const elapsed = performance.now() - t0;

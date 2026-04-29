@@ -35,7 +35,7 @@ use renderer::camera::Camera;
 use renderer::convert::{orient_to_rotation_mat4, tmap_to_rgba};
 use renderer::headless::HeadlessRenderer;
 
-use crate::state::{AppState, LoadedFile};
+use crate::state::{AppState, AudioCmd, LoadedFile};
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -48,6 +48,12 @@ struct ActorRenderEntry {
     cel_index: i32,
     tdt_data: Option<(u32, Tdts, String)>,
     local_bmdls: Vec<ChildRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingSound {
+    sid: i32,
+    cno: u32,
 }
 
 fn select_bmdl_child_for_cel<'a>(
@@ -97,6 +103,22 @@ fn ensure_parent_texture(
         gpu.ensure_texture(texture_key, width, height, &rgba);
     }
     Some(texture_key)
+}
+
+fn collect_sound_event(
+    evt: &ActorEvent,
+    frame: i32,
+    play_audio: bool,
+    pending_sounds: &mut Vec<PendingSound>,
+) {
+    if let EventPayload::Sound(tag) = &evt.payload {
+        if play_audio && evt.header.nfrm == frame && tag.0.ctg == CTG_MSND {
+            pending_sounds.push(PendingSound {
+                sid: tag.0.sid,
+                cno: tag.0.cno,
+            });
+        }
+    }
 }
 
 /// Convert a BRender CAM chunk into a renderer Camera.
@@ -464,13 +486,14 @@ pub(crate) fn render_to_rgba(
     frame: i32,
     width: u32,
     height: u32,
+    play_audio: bool,
 ) -> Result<Vec<u8>, String> {
     // --- Step 1: locate SCEN chunk and extract actor tag_tmpls + transforms --
     // tdt_data = Some((tdf_cno, tdts, stn)) for TDT actors; None for normal actors.
     // local_bmdls = pre-extracted BMDL children from lf.cfl for sid=0 non-TDT actors.
     // Extracted while holding the loaded_file lock so Step 2 needs no re-lock.
     // Also returns bkgd_cno extracted from the GGST start-of-scene events.
-    let (tag_tmpls, bkgd_cno): (Vec<ActorRenderEntry>, Option<u32>) = {
+    let (tag_tmpls, bkgd_cno, pending_sounds): (Vec<ActorRenderEntry>, Option<u32>, Vec<PendingSound>) = {
         let guard = state.loaded_file.lock().unwrap();
         let lf = guard.as_ref().ok_or("No file loaded")?;
 
@@ -509,6 +532,7 @@ pub(crate) fn render_to_rgba(
             });
 
         let mut tags = Vec::new();
+        let mut pending_sounds = Vec::new();
         for child in scen_chunk.children.iter().filter(|c| c.id.ctg == CTG_ACTR) {
             let data = match lf.cfl.get_chunk_data(child.id.ctg, child.id.cno) {
                 Ok(d) => d,
@@ -604,6 +628,14 @@ pub(crate) fn render_to_rgba(
                                                     last_cel = step.icel;
                                                 }
                                             }
+                                            EventPayload::Sound(_) => {
+                                                collect_sound_event(
+                                                    &evt,
+                                                    frame,
+                                                    play_audio,
+                                                    &mut pending_sounds,
+                                                );
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -670,8 +702,12 @@ pub(crate) fn render_to_rgba(
                 });
             }
         }
-        (tags, bkgd_cno)
+        (tags, bkgd_cno, pending_sounds)
     };
+
+    for sound in pending_sounds {
+        let _ = trigger_msnd_audio(state, sound.sid, sound.cno);
+    }
 
     if tag_tmpls.is_empty() {
         return Err("No actors with valid templates".to_string());
@@ -946,9 +982,17 @@ pub fn render_scene_frame(
     frame: i32,
     width: u32,
     height: u32,
+    play_audio: Option<bool>,
     state: State<AppState>,
 ) -> Result<String, String> {
-    let rgba = render_to_rgba(state.inner(), scene_idx, frame, width, height)?;
+    let rgba = render_to_rgba(
+        state.inner(),
+        scene_idx,
+        frame,
+        width,
+        height,
+        play_audio.unwrap_or(false),
+    )?;
     let png_bytes = encode_rgba_to_png(&rgba, width, height)?;
     let b64 = base64::prelude::BASE64_STANDARD.encode(&png_bytes);
     Ok(format!("data:image/png;base64,{b64}"))
@@ -1003,6 +1047,72 @@ pub fn list_sounds(state: State<AppState>) -> Result<Vec<SoundEntry>, String> {
     Ok(sounds)
 }
 
+fn pcm_wav_from_msnd(cfl: &ChunkyFile, cno: u32) -> Result<Option<Vec<u8>>, String> {
+    let msnd_chunk = cfl
+        .chunks
+        .iter()
+        .find(|c| c.id.ctg == CTG_MSND && c.id.cno == cno)
+        .ok_or_else(|| format!("MSND cno={cno} not found"))?;
+
+    let wave_child = match msnd_chunk
+        .children
+        .iter()
+        .find(|ch| ch.chid == 0 && ch.id.ctg == CTG_WAVE)
+    {
+        Some(ch) => ch,
+        None => return Ok(None),
+    };
+
+    let wave_data = cfl
+        .get_chunk_data(wave_child.id.ctg, wave_child.id.cno)
+        .map_err(|e| format!("Cannot get WAVE data: {e}"))?;
+
+    let (_, samples) = decode_wav(&wave_data).map_err(|e| format!("WAV decode error: {e}"))?;
+    Ok(Some(build_pcm_wav(&samples, 22050, 1)))
+}
+
+fn trigger_msnd_audio(state: &AppState, sid: i32, cno: u32) -> Result<(), String> {
+    let result = if sid == 0 {
+        let guard = state.loaded_file.lock().unwrap();
+        let lf = guard.as_ref().ok_or("No file loaded")?;
+        pcm_wav_from_msnd(&lf.cfl, cno)
+    } else {
+        let content_dir = state
+            .content_dir
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "Content directory not set".to_string())?;
+
+        let snds_path = content_dir.join("snds.3cn");
+        let file = std::fs::File::open(&snds_path)
+            .map_err(|e| format!("Cannot open snds.3cn: {e}"))?;
+        let mut reader = BufReader::new(file);
+        let cfl = ChunkyFile::read(&mut reader).map_err(|e| format!("Parse snds.3cn: {e}"))?;
+        pcm_wav_from_msnd(&cfl, cno)
+    };
+
+    let pcm_wav = match result {
+        Ok(Some(pcm_wav)) => pcm_wav,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            eprintln!("[AUDIO] MSND sid={sid} cno={cno}: {e}");
+            return Err(e);
+        }
+    };
+
+    let audio_guard = state.audio_tx.lock().unwrap();
+    if let Some(tx) = &*audio_guard {
+        if let Err(e) = tx.send(AudioCmd::PlayWav(pcm_wav)) {
+            let msg = format!("Audio thread error: {e}");
+            eprintln!("[AUDIO] MSND sid={sid} cno={cno}: {msg}");
+            return Err(msg);
+        }
+    }
+
+    Ok(())
+}
+
 /// Play the WAV audio for the given MSND cno from snds.3cn.
 #[tauri::command]
 pub fn play_sound(cno: u32, state: State<AppState>) -> Result<(), String> {
@@ -1018,32 +1128,12 @@ pub fn play_sound(cno: u32, state: State<AppState>) -> Result<(), String> {
     let mut reader = BufReader::new(file);
     let cfl = ChunkyFile::read(&mut reader).map_err(|e| format!("Parse snds.3cn: {e}"))?;
 
-    // Find the MSND with the given cno.
-    let msnd_chunk = cfl
-        .chunks
-        .iter()
-        .find(|c| c.id.ctg == CTG_MSND && c.id.cno == cno)
-        .ok_or_else(|| format!("MSND cno={cno} not found"))?;
-
-    // Find the WAVE child (chid = 0).
-    let wave_child = msnd_chunk
-        .children
-        .iter()
-        .find(|ch| ch.id.ctg == CTG_WAVE)
+    let pcm_wav = pcm_wav_from_msnd(&cfl, cno)?
         .ok_or_else(|| format!("No WAVE child in MSND cno={cno}"))?;
-
-    let wave_data = cfl
-        .get_chunk_data(wave_child.id.ctg, wave_child.id.cno)
-        .map_err(|e| format!("Cannot get WAVE data: {e}"))?;
-
-    let (_, samples) = decode_wav(&wave_data).map_err(|e| format!("WAV decode error: {e}"))?;
-
-    // Build a minimal in-memory WAV (16-bit PCM) for rodio.
-    let pcm_wav = build_pcm_wav(&samples, 22050, 1);
 
     let audio_guard = state.audio_tx.lock().unwrap();
     if let Some(tx) = &*audio_guard {
-        tx.send(crate::state::AudioCmd::PlayWav(pcm_wav))
+        tx.send(AudioCmd::PlayWav(pcm_wav))
             .map_err(|e| format!("Audio thread error: {e}"))?;
     }
     Ok(())
@@ -2046,6 +2136,7 @@ fn find_content_dir(movie_path: &std::path::Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::tag::TagOnFile;
     use std::collections::HashMap;
 
     fn empty_cfl(chunks: Vec<ChunkEntry>) -> ChunkyFile {
@@ -2090,6 +2181,43 @@ mod tests {
             id: ChunkId { ctg, cno },
             chid,
         }
+    }
+
+    fn sound_event_group(nfrm: i32, sid: i32, ctg: u32, cno: u32) -> GenericGroup {
+        let mut fixed = vec![0u8; 20];
+        fixed[0..4].copy_from_slice(&aet::SOUND.to_le_bytes());
+        fixed[4..8].copy_from_slice(&nfrm.to_le_bytes());
+        let var = TagOnFile { sid, ctg, cno }.to_le_bytes().to_vec();
+        GenericGroup {
+            fixed_size: 20,
+            bo: 0x0001,
+            osk: 0,
+            fixed_entries: vec![fixed],
+            variable_entries: vec![var],
+        }
+    }
+
+    fn collect_from_group(gg: &GenericGroup, frame: i32, play_audio: bool) -> Vec<PendingSound> {
+        let mut pending = Vec::new();
+        for (fixed_bytes, var_bytes) in gg.fixed_entries.iter().zip(gg.variable_entries.iter()) {
+            let fixed_arr: &[u8; 20] = fixed_bytes[..20].try_into().unwrap();
+            let evt = ActorEvent::parse(fixed_arr, var_bytes).unwrap();
+            collect_sound_event(&evt, frame, play_audio, &mut pending);
+        }
+        pending
+    }
+
+    #[test]
+    fn sound_event_dispatch_requires_exact_frame_and_playback() {
+        let raw = sound_event_group(5, 1, CTG_MSND, 42).write();
+        let gg = GenericGroup::read(&raw).unwrap();
+
+        assert_eq!(
+            collect_from_group(&gg, 5, true),
+            vec![PendingSound { sid: 1, cno: 42 }]
+        );
+        assert!(collect_from_group(&gg, 5, false).is_empty());
+        assert!(collect_from_group(&gg, 6, true).is_empty());
     }
 
     #[test]

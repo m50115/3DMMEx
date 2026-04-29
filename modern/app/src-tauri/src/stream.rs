@@ -41,12 +41,17 @@ pub fn handle<R: Runtime>(
     // Optional w/h path segments; default to 640×480 for backwards compat.
     let width: u32 = segments.get(3).and_then(|s| s.parse().ok()).unwrap_or(640);
     let height: u32 = segments.get(4).and_then(|s| s.parse().ok()).unwrap_or(480);
+    let play_audio = request
+        .uri()
+        .query()
+        .map(|q| q.split('&').any(|part| part == "playAudio=1" || part == "playAudio=true"))
+        .unwrap_or(false);
 
     let app = ctx.app_handle();
     let state = app.state::<AppState>();
 
     let t0 = std::time::Instant::now();
-    let rgba = match render_to_rgba(state.inner(), scene_idx, frame, width, height) {
+    let rgba = match render_to_rgba(state.inner(), scene_idx, frame, width, height, play_audio) {
         Ok(r) => r,
         Err(e) => {
             // Return a blank dark-gray frame instead of HTTP 500 so the frontend
