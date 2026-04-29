@@ -15,21 +15,25 @@ use engine::model::Model;
 use engine::tag::{CTG_BMDL, CTG_TDF};
 use engine::tdf::BrTdf;
 
-const TDFS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/tdfs.3cn");
+const TDFS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/tdfs.3cn"
+);
 
 fn open_tdfs() -> ChunkyFile {
-    let file = File::open(TDFS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {TDFS_PATH}: {e}"));
+    let file = File::open(TDFS_PATH).unwrap_or_else(|e| panic!("Cannot open {TDFS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
-    ChunkyFile::read(&mut reader)
-        .unwrap_or_else(|e| panic!("Cannot parse {TDFS_PATH}: {e}"))
+    ChunkyFile::read(&mut reader).unwrap_or_else(|e| panic!("Cannot parse {TDFS_PATH}: {e}"))
 }
 
 #[test]
 fn all_tdf_chunks_parse() {
     let cfl = open_tdfs();
     let tdf_chunks: Vec<_> = cfl.chunks.iter().filter(|c| c.id.ctg == CTG_TDF).collect();
-    assert!(!tdf_chunks.is_empty(), "No CTG_TDF chunks found in tdfs.3cn");
+    assert!(
+        !tdf_chunks.is_empty(),
+        "No CTG_TDF chunks found in tdfs.3cn"
+    );
 
     let mut parsed = 0u32;
     let mut errors = Vec::new();
@@ -42,18 +46,23 @@ fn all_tdf_chunks_parse() {
                         tdf.dxr.len(),
                         tdf.cch as usize,
                         "TDF:{} dxr.len()={} != cch={}",
-                        chunk.id.cno, tdf.dxr.len(), tdf.cch
+                        chunk.id.cno,
+                        tdf.dxr.len(),
+                        tdf.cch
                     );
                     assert_eq!(
                         tdf.dyr.len(),
                         tdf.cch as usize,
                         "TDF:{} dyr.len()={} != cch={}",
-                        chunk.id.cno, tdf.dyr.len(), tdf.cch
+                        chunk.id.cno,
+                        tdf.dyr.len(),
+                        tdf.cch
                     );
                     assert!(
                         tdf.dyr_max > 0.0,
                         "TDF:{} dyr_max={} not positive",
-                        chunk.id.cno, tdf.dyr_max
+                        chunk.id.cno,
+                        tdf.dyr_max
                     );
                     parsed += 1;
                 }
@@ -86,8 +95,9 @@ fn tdf_has_glyph_a_with_valid_faces() {
             .map(|ch| (tdf_chunk.id.cno, ch.id.cno))
     });
 
-    let (tdf_cno, bmdl_cno) = glyph_a
-        .expect("No TDF chunk contains a BMDL child at chid==65 ('A') — tdfs.3cn may lack letter glyphs");
+    let (tdf_cno, bmdl_cno) = glyph_a.expect(
+        "No TDF chunk contains a BMDL child at chid==65 ('A') — tdfs.3cn may lack letter glyphs",
+    );
 
     println!("Found glyph 'A' in TDF:{tdf_cno} → BMDL:{bmdl_cno}");
 
@@ -95,8 +105,8 @@ fn tdf_has_glyph_a_with_valid_faces() {
         .get_chunk_data(CTG_BMDL, bmdl_cno)
         .unwrap_or_else(|e| panic!("Cannot read BMDL:{bmdl_cno}: {e}"));
 
-    let model = Model::from_bytes(&data)
-        .unwrap_or_else(|e| panic!("Cannot parse BMDL:{bmdl_cno}: {e}"));
+    let model =
+        Model::from_bytes(&data).unwrap_or_else(|e| panic!("Cannot parse BMDL:{bmdl_cno}: {e}"));
 
     assert!(
         model.has_valid_faces(),

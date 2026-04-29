@@ -7,7 +7,10 @@ use chunky_format::ChunkyFile;
 use engine::material::BrMaterial;
 use engine::tag::CTG_MTRL;
 
-const MTRLS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/mtrls.3cn");
+const MTRLS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/mtrls.3cn"
+);
 
 /// Collect all successfully-parsed BrMaterial values from tmpls.3cn.
 fn load_all_materials(cfl: &ChunkyFile) -> Vec<BrMaterial> {
@@ -23,8 +26,7 @@ fn load_all_materials(cfl: &ChunkyFile) -> Vec<BrMaterial> {
 
 #[test]
 fn tmpls_contains_bmtl_chunks() {
-    let file = File::open(MTRLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
+    let file = File::open(MTRLS_PATH).unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
     let cfl = ChunkyFile::read(&mut BufReader::new(file)).unwrap();
 
     let count = cfl.chunks.iter().filter(|c| c.id.ctg == CTG_MTRL).count();
@@ -33,8 +35,7 @@ fn tmpls_contains_bmtl_chunks() {
 
 #[test]
 fn all_bmtl_parse_successfully() {
-    let file = File::open(MTRLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
+    let file = File::open(MTRLS_PATH).unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
     let cfl = ChunkyFile::read(&mut BufReader::new(file)).unwrap();
 
     let total = cfl.chunks.iter().filter(|c| c.id.ctg == CTG_MTRL).count();
@@ -50,8 +51,7 @@ fn all_bmtl_parse_successfully() {
 
 #[test]
 fn material_colours_are_valid_rgb() {
-    let file = File::open(MTRLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
+    let file = File::open(MTRLS_PATH).unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
     let cfl = ChunkyFile::read(&mut BufReader::new(file)).unwrap();
 
     for mat in load_all_materials(&cfl) {
@@ -67,8 +67,7 @@ fn material_colours_are_valid_rgb() {
 
 #[test]
 fn material_fractions_in_range() {
-    let file = File::open(MTRLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
+    let file = File::open(MTRLS_PATH).unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
     let cfl = ChunkyFile::read(&mut BufReader::new(file)).unwrap();
 
     for mat in load_all_materials(&cfl) {
@@ -85,8 +84,7 @@ fn material_fractions_in_range() {
 
 #[test]
 fn material_power_is_non_negative() {
-    let file = File::open(MTRLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
+    let file = File::open(MTRLS_PATH).unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
     let cfl = ChunkyFile::read(&mut BufReader::new(file)).unwrap();
 
     for mat in load_all_materials(&cfl) {
@@ -101,14 +99,16 @@ fn material_power_is_non_negative() {
 
 #[test]
 fn material_roundtrip() {
-    let file = File::open(MTRLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
+    let file = File::open(MTRLS_PATH).unwrap_or_else(|e| panic!("Cannot open {MTRLS_PATH}: {e}"));
     let cfl = ChunkyFile::read(&mut BufReader::new(file)).unwrap();
 
     for mat in load_all_materials(&cfl) {
         let bytes = mat.to_bytes();
-        let mat2 = BrMaterial::from_bytes(&bytes)
-            .expect("Roundtrip parse failed");
-        assert_eq!(mat, mat2, "Roundtrip mismatch for material colour={:#010x}", mat.colour);
+        let mat2 = BrMaterial::from_bytes(&bytes).expect("Roundtrip parse failed");
+        assert_eq!(
+            mat, mat2,
+            "Roundtrip mismatch for material colour={:#010x}",
+            mat.colour
+        );
     }
 }

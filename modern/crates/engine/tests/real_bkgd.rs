@@ -8,12 +8,13 @@ use engine::background::{BrBackground, BrCamera, BrLightList, BKGDF_SIZE, CAM_SI
 use engine::error::EngineError;
 use engine::tag::{CTG_BKGD, CTG_CAM, CTG_GLLT};
 
-const BKGDS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/bkgds.3cn");
+const BKGDS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/bkgds.3cn"
+);
 
 fn open_bkgds() -> ChunkyFile {
-    let f = File::open(BKGDS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {BKGDS_PATH}: {e}"));
+    let f = File::open(BKGDS_PATH).unwrap_or_else(|e| panic!("Cannot open {BKGDS_PATH}: {e}"));
     ChunkyFile::read(&mut BufReader::new(f)).unwrap()
 }
 

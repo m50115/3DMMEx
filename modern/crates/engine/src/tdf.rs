@@ -88,7 +88,12 @@ impl BrTdf {
             dyr.push(FixedScalar(yv).to_f64() as f32);
         }
 
-        Ok(Self { cch, dyr_max, dxr, dyr })
+        Ok(Self {
+            cch,
+            dyr_max,
+            dxr,
+            dyr,
+        })
     }
 }
 
@@ -102,8 +107,12 @@ mod tests {
         b.extend_from_slice(&0i16.to_le_bytes()); // osk
         b.extend_from_slice(&cch.to_le_bytes());
         b.extend_from_slice(&dyr_max.to_le_bytes());
-        for &v in dxr { b.extend_from_slice(&v.to_le_bytes()); }
-        for &v in dyr { b.extend_from_slice(&v.to_le_bytes()); }
+        for &v in dxr {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for &v in dyr {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
         b
     }
 

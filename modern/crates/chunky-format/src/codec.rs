@@ -58,8 +58,8 @@ pub fn decompress(data: &[u8], _cb_hint: usize) -> Result<Vec<u8>> {
     match fmt {
         FMT_KCDC => decompress_kcdc(compressed, cb_dst),
         FMT_KCD2 => decompress_kcd2(compressed, cb_dst),
-        FMT_NIL  => Ok(compressed.to_vec()),
-        _        => Err(ChunkyError::InvalidCompressionFormat(fmt)),
+        FMT_NIL => Ok(compressed.to_vec()),
+        _ => Err(ChunkyError::InvalidCompressionFormat(fmt)),
     }
 }
 
@@ -86,7 +86,7 @@ impl<'a> BitReader<'a> {
     fn peek(&self, n: u32) -> u32 {
         debug_assert!(n <= 32);
         let byte_idx = (self.bit_pos / 8) as usize;
-        let bit_idx  = (self.bit_pos % 8) as u32;
+        let bit_idx = (self.bit_pos % 8) as u32;
         // Read 5 bytes to safely cover up to 32 bits spanning byte boundaries
         let mut v = 0u64;
         for i in 0..5usize {
@@ -211,22 +211,28 @@ fn decompress_kcd2(src: &[u8], expected: usize) -> Result<Vec<u8>> {
             if k == 0 {
                 // Byte-aligned: straightforward read of count+1 literals
                 for _ in 0..=count {
-                    if out.len() >= expected { break; }
+                    if out.len() >= expected {
+                        break;
+                    }
                     out.push(bits.read(8) as u8);
                 }
             } else {
                 // Not byte-aligned: last literal is split across a byte boundary
-                let lo = bits.read(8 - k);          // low (8−k) bits of last literal
+                let lo = bits.read(8 - k); // low (8−k) bits of last literal
                 let mut body = Vec::with_capacity(count as usize);
                 for _ in 0..count {
-                    body.push(bits.read(8) as u8);  // first `count` literals
+                    body.push(bits.read(8) as u8); // first `count` literals
                 }
-                let hi  = bits.read(k);             // high k bits of last literal
+                let hi = bits.read(k); // high k bits of last literal
                 let last_byte = lo as u8 | ((hi as u8) << (8 - k));
                 for b in body {
-                    if out.len() < expected { out.push(b); }
+                    if out.len() < expected {
+                        out.push(b);
+                    }
                 }
-                if out.len() < expected { out.push(last_byte); }
+                if out.len() < expected {
+                    out.push(last_byte);
+                }
             }
         } else {
             // ── Match ─────────────────────────────────────────────────
@@ -338,9 +344,11 @@ fn read_length_kcd2(bits: &mut BitReader) -> (u32, u32) {
 /// Copy `length` bytes from `offset` bytes back in `out` (overlapping-safe).
 fn copy_match(out: &mut Vec<u8>, offset: usize, length: usize) -> Result<()> {
     if offset > out.len() {
-        return Err(ChunkyError::DecompressionError(
-            format!("offset {} > output length {}", offset, out.len())
-        ));
+        return Err(ChunkyError::DecompressionError(format!(
+            "offset {} > output length {}",
+            offset,
+            out.len()
+        )));
     }
     let start = out.len() - offset;
     for i in 0..length {
@@ -356,16 +364,19 @@ fn validate_stream(src: &[u8]) -> Result<()> {
         return Err(ChunkyError::UnexpectedEof);
     }
     if src[0] != 0x00 {
-        return Err(ChunkyError::DecompressionError(
-            format!("bad flags byte: 0x{:02X}", src[0])
-        ));
+        return Err(ChunkyError::DecompressionError(format!(
+            "bad flags byte: 0x{:02X}",
+            src[0]
+        )));
     }
     let tail_start = src.len() - TAIL_SIZE;
     for (i, &b) in src[tail_start..].iter().enumerate() {
         if b != 0xFF {
-            return Err(ChunkyError::DecompressionError(
-                format!("bad tail byte at -{}: 0x{:02X}", TAIL_SIZE - i, b)
-            ));
+            return Err(ChunkyError::DecompressionError(format!(
+                "bad tail byte at -{}: 0x{:02X}",
+                TAIL_SIZE - i,
+                b
+            )));
         }
     }
     Ok(())
@@ -373,9 +384,11 @@ fn validate_stream(src: &[u8]) -> Result<()> {
 
 fn verify_size(out: &[u8], expected: usize) -> Result<Vec<u8>> {
     if out.len() != expected {
-        return Err(ChunkyError::DecompressionError(
-            format!("expected {} bytes, got {}", expected, out.len())
-        ));
+        return Err(ChunkyError::DecompressionError(format!(
+            "expected {} bytes, got {}",
+            expected,
+            out.len()
+        )));
     }
     Ok(out.to_vec())
 }

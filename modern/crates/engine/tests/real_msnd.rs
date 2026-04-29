@@ -10,21 +10,18 @@ use chunky_format::ChunkyFile;
 use engine::msnd::{MovieSound, SoundType};
 use engine::tag::CTG_MSND;
 
-const SNDS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/snds.3cn");
+const SNDS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/snds.3cn"
+);
 
 #[test]
 fn all_msnd_chunks_parse() {
-    let file = File::open(SNDS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {SNDS_PATH}: {e}"));
+    let file = File::open(SNDS_PATH).unwrap_or_else(|e| panic!("Cannot open {SNDS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
     let cfl = ChunkyFile::read(&mut reader).expect("parse snds.3cn");
 
-    let msnd_chunks: Vec<_> = cfl
-        .chunks
-        .iter()
-        .filter(|c| c.id.ctg == CTG_MSND)
-        .collect();
+    let msnd_chunks: Vec<_> = cfl.chunks.iter().filter(|c| c.id.ctg == CTG_MSND).collect();
 
     assert!(!msnd_chunks.is_empty(), "no MSND chunks in snds.3cn");
 
@@ -65,8 +62,7 @@ fn all_msnd_chunks_parse() {
 
     // Sanity: snds.3cn should contain SFX and MIDI sounds
     assert!(
-        counts[SoundType::Sfx as usize] > 0
-            || counts[SoundType::Speech as usize] > 0,
+        counts[SoundType::Sfx as usize] > 0 || counts[SoundType::Speech as usize] > 0,
         "expected at least one WAV-type sound"
     );
 }

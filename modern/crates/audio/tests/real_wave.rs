@@ -16,13 +16,14 @@ use engine::tag::CTG_WAVE;
 
 use audio::decode_wav;
 
-const SNDS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/snds.3cn");
+const SNDS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/snds.3cn"
+);
 
 #[test]
 fn first_wave_chunk_decodes() {
-    let file = File::open(SNDS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {SNDS_PATH}: {e}"));
+    let file = File::open(SNDS_PATH).unwrap_or_else(|e| panic!("Cannot open {SNDS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
     let cfl = ChunkyFile::read(&mut reader).expect("parse snds.3cn");
 
@@ -47,11 +48,7 @@ fn first_wave_chunk_decodes() {
 
     println!(
         "WAVE cno={}: fmt={} {}Hz {}ch {} samples",
-        wave_chunk.id.cno,
-        info.format,
-        info.sample_rate,
-        info.channels,
-        info.sample_count
+        wave_chunk.id.cno, info.format, info.sample_rate, info.channels, info.sample_count
     );
 
     assert_eq!(info.sample_rate, 22050, "expected 22050 Hz");
@@ -63,8 +60,7 @@ fn first_wave_chunk_decodes() {
 
 #[test]
 fn batch_wave_chunks_decode() {
-    let file = File::open(SNDS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {SNDS_PATH}: {e}"));
+    let file = File::open(SNDS_PATH).unwrap_or_else(|e| panic!("Cannot open {SNDS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
     let cfl = ChunkyFile::read(&mut reader).expect("parse snds.3cn");
 
@@ -83,7 +79,10 @@ fn batch_wave_chunks_decode() {
     for chunk in &wave_chunks {
         let data = match cfl.get_chunk_data(chunk.id.ctg, chunk.id.cno) {
             Ok(d) => d,
-            Err(_) => { errors += 1; continue; }
+            Err(_) => {
+                errors += 1;
+                continue;
+            }
         };
         match decode_wav(&data) {
             Ok((info, _)) => {

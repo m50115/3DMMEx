@@ -12,25 +12,92 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use audio::decode_wav;
+use chunky_format::cfl::{
+    ChunkyHeader, CTG_CREATOR_3DMM, MAGIC_CHUNKY, VERSION_BACK, VERSION_CURRENT,
+};
 use chunky_format::collections::{GenericGroup, GenericList};
-use chunky_format::{ChunkEntry, ChunkFlags, ChunkId, ChildRef, ChunkyFile};
+use chunky_format::{ChildRef, ChunkEntry, ChunkFlags, ChunkId, ChunkyFile};
 use engine::actor::ActorOnFile;
-use engine::events::{ActorEvent, EventPayload, OrientPayload, aet};
+use engine::background::BrCamera;
+use engine::events::{aet, ActorEvent, EventPayload, OrientPayload};
 use engine::fixedpoint::FixedAngle;
 use engine::model::Model;
 use engine::msnd::MovieSound;
-use chunky_format::cfl::{ChunkyHeader, CTG_CREATOR_3DMM, MAGIC_CHUNKY, VERSION_BACK, VERSION_CURRENT};
-use engine::background::BrCamera;
-use engine::tag::{CTG_ACTR, CTG_BKGD, CTG_BMDL, CTG_CAM, CTG_GGAE, CTG_GGFR, CTG_GGST, CTG_GST, CTG_MSND, CTG_MVIE, CTG_PATH, CTG_SCEN, CTG_TDF, CTG_TDT, CTG_TMPL, CTG_WAVE};
-use renderer::camera::Camera;
+use engine::tag::{
+    CTG_ACTR, CTG_BKGD, CTG_BMDL, CTG_CAM, CTG_GGAE, CTG_GGFR, CTG_GGST, CTG_GST, CTG_MSND,
+    CTG_MTRL, CTG_MVIE, CTG_PATH, CTG_SCEN, CTG_TDF, CTG_TDT, CTG_TMAP, CTG_TMPL, CTG_WAVE,
+};
 use engine::tdf::BrTdf;
 use engine::tdt::{BrTdt, Tdts};
+use engine::tmap::BrTmap;
 use engine::transform::RoutePoint;
-use renderer::convert::orient_to_rotation_mat4;
+use renderer::camera::Camera;
+use renderer::convert::{orient_to_rotation_mat4, tmap_to_rgba};
+use renderer::headless::HeadlessRenderer;
 
 use crate::state::{AppState, LoadedFile};
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct ActorRenderEntry {
+    ctg: u32,
+    cno: u32,
+    sid: i32,
+    transform: glam::Mat4,
+    cel_index: i32,
+    tdt_data: Option<(u32, Tdts, String)>,
+    local_bmdls: Vec<ChildRef>,
+}
+
+fn select_bmdl_child_for_cel<'a>(
+    bmdl_children: &'a [ChildRef],
+    cel_index: i32,
+) -> (Option<&'a ChildRef>, bool) {
+    if bmdl_children.is_empty() {
+        return (None, false);
+    }
+    if cel_index >= 0 {
+        if let Some(child) = bmdl_children.iter().find(|ch| ch.chid == cel_index as u32) {
+            return (Some(child), false);
+        }
+    }
+    let fallback = bmdl_children
+        .iter()
+        .find(|ch| ch.chid == 0)
+        .or_else(|| bmdl_children.first());
+    (fallback, true)
+}
+
+fn resolve_texture_key_for_bmdl(cfl: &ChunkyFile, parent_ctg: u32, parent_cno: u32) -> Option<u32> {
+    let mtrl_cno = cfl
+        .get_children(parent_ctg, parent_cno)
+        .into_iter()
+        .find(|ch| ch.id.ctg == CTG_MTRL)?
+        .id
+        .cno;
+    cfl.get_children(CTG_MTRL, mtrl_cno)
+        .into_iter()
+        .find(|ch| ch.chid == 0 && ch.id.ctg == CTG_TMAP)
+        .map(|ch| ch.id.cno)
+}
+
+fn ensure_parent_texture(
+    gpu: &mut HeadlessRenderer,
+    cfl: &ChunkyFile,
+    parent_ctg: u32,
+    parent_cno: u32,
+) -> Option<(u32, u32)> {
+    let tmap_cno = resolve_texture_key_for_bmdl(cfl, parent_ctg, parent_cno)?;
+    let texture_key = (CTG_TMAP, tmap_cno);
+    if !gpu.has_texture(texture_key) {
+        let data = cfl.get_chunk_data(CTG_TMAP, tmap_cno).ok()?;
+        let tmap = BrTmap::from_bytes(&data).ok()?;
+        let (width, height, rgba) = tmap_to_rgba(&tmap);
+        gpu.ensure_texture(texture_key, width, height, &rgba);
+    }
+    Some(texture_key)
+}
 
 /// Convert a BRender CAM chunk into a renderer Camera.
 /// Row 2 of bmat34 = forward direction; row 1 = up; row 3 = position (all BRS).
@@ -44,17 +111,36 @@ fn br_camera_to_camera(br_cam: &BrCamera) -> Camera {
     ];
 
     let position = glam::Vec3::from_array(pos);
-    let forward  = glam::Vec3::from_array(fwd);
-    let up_vec   = glam::Vec3::from_array(up_raw);
+    let forward = glam::Vec3::from_array(fwd);
+    let up_vec = glam::Vec3::from_array(up_raw);
 
-    let target = position + if forward.length_squared() > 1e-6 { forward.normalize() } else { glam::Vec3::NEG_Z };
-    let up     = if up_vec.length_squared() > 1e-6 { up_vec.normalize() } else { glam::Vec3::Y };
+    let target = position
+        + if forward.length_squared() > 1e-6 {
+            forward.normalize()
+        } else {
+            glam::Vec3::NEG_Z
+        };
+    let up = if up_vec.length_squared() > 1e-6 {
+        up_vec.normalize()
+    } else {
+        glam::Vec3::Y
+    };
 
-    let fov_y = br_cam.fov_radians().clamp(0.01, std::f32::consts::PI - 0.01);
-    let near  = br_cam.hither_f32().max(0.001);
-    let far   = br_cam.yon_f32().max(near + 0.1);
+    let fov_y = br_cam
+        .fov_radians()
+        .clamp(0.01, std::f32::consts::PI - 0.01);
+    let near = br_cam.hither_f32().max(0.001);
+    let far = br_cam.yon_f32().max(near + 0.1);
 
-    Camera { position, target, up, fov_y, near, far, aspect: 1.0 }
+    Camera {
+        position,
+        target,
+        up,
+        fov_y,
+        near,
+        far,
+        aspect: 1.0,
+    }
 }
 
 // ── Public types returned to the frontend ─────────────────────────────────
@@ -88,11 +174,9 @@ pub struct SoundEntry {
 #[tauri::command]
 pub fn open_file(path: String, state: State<AppState>) -> Result<MovieInfo, String> {
     let pb = PathBuf::from(&path);
-    let file = std::fs::File::open(&pb)
-        .map_err(|e| format!("Cannot open {path}: {e}"))?;
+    let file = std::fs::File::open(&pb).map_err(|e| format!("Cannot open {path}: {e}"))?;
     let mut reader = BufReader::new(file);
-    let cfl = ChunkyFile::read(&mut reader)
-        .map_err(|e| format!("Parse error: {e}"))?;
+    let cfl = ChunkyFile::read(&mut reader).map_err(|e| format!("Parse error: {e}"))?;
 
     // Find content-files/ by walking up from the movie file, then up from the
     // executable. Fan movies may live in a completely different directory tree
@@ -131,9 +215,7 @@ pub fn open_file(path: String, state: State<AppState>) -> Result<MovieInfo, Stri
     }
 
     // Count SCEN chunks and parse scene headers.
-    let scen_entries: Vec<_> = cfl.chunks.iter()
-        .filter(|c| c.id.ctg == CTG_SCEN)
-        .collect();
+    let scen_entries: Vec<_> = cfl.chunks.iter().filter(|c| c.id.ctg == CTG_SCEN).collect();
 
     let mut scenes: Vec<SceneInfo> = Vec::new();
     let mut total_frames: i32 = 0;
@@ -142,7 +224,9 @@ pub fn open_file(path: String, state: State<AppState>) -> Result<MovieInfo, Stri
         // Real scene duration = max(nfrm_last) across all actors.
         // SceneHeader.nfrm_mac is NOT the frame count — it stores the
         // highest scene-level event frame, which is often 1 or 0.
-        let frame_count: i32 = chunk.children.iter()
+        let frame_count: i32 = chunk
+            .children
+            .iter()
             .filter(|c| c.id.ctg == CTG_ACTR)
             .filter_map(|c| cfl.get_chunk_data(c.id.ctg, c.id.cno).ok())
             .filter(|d| d.len() >= ActorOnFile::SIZE)
@@ -158,10 +242,15 @@ pub fn open_file(path: String, state: State<AppState>) -> Result<MovieInfo, Stri
         let actor_count = chunk.children.len();
 
         total_frames += frame_count;
-        scenes.push(SceneInfo { scene_idx: idx, frame_count, actor_count });
+        scenes.push(SceneInfo {
+            scene_idx: idx,
+            frame_count,
+            actor_count,
+        });
     }
 
-    let file_name = pb.file_name()
+    let file_name = pb
+        .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.clone());
 
@@ -201,21 +290,34 @@ pub fn render_demo_frame(
     height: u32,
     state: State<AppState>,
 ) -> Result<String, String> {
-    let tmpls = state.tmpls.lock().unwrap().clone()
+    let tmpls = state
+        .tmpls
+        .lock()
+        .unwrap()
+        .clone()
         .ok_or_else(|| "tmpls.3cn not loaded (open a .3mm file first)".to_string())?;
 
-    let model = tmpls.chunks.iter()
+    let model = tmpls
+        .chunks
+        .iter()
         .filter(|c| c.id.ctg == CTG_BMDL)
         .find_map(|c| {
             let data = tmpls.get_chunk_data(c.id.ctg, c.id.cno).ok()?;
-            if data.len() < 80 { return None; }
+            if data.len() < 80 {
+                return None;
+            }
             let m = Model::from_bytes(&data).ok()?;
-            if m.has_valid_faces() && !m.vertices.is_empty() { Some(m) } else { None }
+            if m.has_valid_faces() && !m.vertices.is_empty() {
+                Some(m)
+            } else {
+                None
+            }
         })
         .ok_or_else(|| "No renderable model found in tmpls.3cn".to_string())?;
 
     let gpu_guard = state.gpu.lock().unwrap();
-    let gpu = gpu_guard.as_ref()
+    let gpu = gpu_guard
+        .as_ref()
         .ok_or_else(|| "No GPU adapter available".to_string())?;
 
     let rgba = gpu.render_model(&model, width, height);
@@ -235,7 +337,13 @@ pub fn render_demo_frame(
 ///
 /// `dxr` / `dyr` are indexed by ASCII byte value. Elements outside `dxr.len()` fall back to
 /// `dxr[0]`. `dyr_max` is the maximum character height from the TDF header.
-fn compose_layout(stn: &str, tdts: Tdts, dxr: &[f32], dyr: &[f32], dyr_max: f32) -> Vec<glam::Mat4> {
+fn compose_layout(
+    stn: &str,
+    tdts: Tdts,
+    dxr: &[f32],
+    dyr: &[f32],
+    dyr_max: f32,
+) -> Vec<glam::Mat4> {
     use std::f32::consts::PI;
 
     let chars: Vec<u8> = stn.bytes().filter(|&b| b >= 0x20).collect();
@@ -248,16 +356,28 @@ fn compose_layout(stn: &str, tdts: Tdts, dxr: &[f32], dyr: &[f32], dyr_max: f32)
 
     let get_dx = |ch: u8| -> f32 {
         let i = ch as usize;
-        if i < dxr.len() { dxr[i] } else { fallback_dx }
+        if i < dxr.len() {
+            dxr[i]
+        } else {
+            fallback_dx
+        }
     };
     let get_dy = |ch: u8| -> f32 {
         let i = ch as usize;
-        if i < dyr.len() { dyr[i] } else { fallback_dy }
+        if i < dyr.len() {
+            dyr[i]
+        } else {
+            fallback_dy
+        }
     };
 
     let total_width: f32 = chars.iter().map(|&c| get_dx(c)).sum();
     let total_height: f32 = chars.iter().map(|&c| get_dy(c)).sum();
-    let radius = if total_width > 0.0 { total_width / (2.0 * PI) } else { 1.0 };
+    let radius = if total_width > 0.0 {
+        total_width / (2.0 * PI)
+    } else {
+        1.0
+    };
 
     let mut result = Vec::with_capacity(chars.len());
     let mut cursor_x = 0.0f32;
@@ -268,13 +388,15 @@ fn compose_layout(stn: &str, tdts: Tdts, dxr: &[f32], dyr: &[f32], dyr_max: f32)
         // Character center x, relative to string center
         let xr = cursor_x + dx * 0.5 - total_width * 0.5;
         // Fractional position 0..1 along string width
-        let xr_fract = if total_width > 0.0 { (cursor_x + dx * 0.5) / total_width } else { 0.5 };
+        let xr_fract = if total_width > 0.0 {
+            (cursor_x + dx * 0.5) / total_width
+        } else {
+            0.5
+        };
         let quarter = total_width * 0.25;
 
         let mat = match tdts {
-            Tdts::Normal => {
-                glam::Mat4::from_translation(glam::vec3(xr, 0.0, 0.0))
-            }
+            Tdts::Normal => glam::Mat4::from_translation(glam::vec3(xr, 0.0, 0.0)),
             Tdts::ArchPositive => {
                 let y = quarter * (PI * xr_fract).sin();
                 glam::Mat4::from_translation(glam::vec3(xr, y, 0.0))
@@ -344,31 +466,38 @@ pub(crate) fn render_to_rgba(
     height: u32,
 ) -> Result<Vec<u8>, String> {
     // --- Step 1: locate SCEN chunk and extract actor tag_tmpls + transforms --
-    // Each entry: (ctg, cno, transform, tdt_data)
     // tdt_data = Some((tdf_cno, tdts, stn)) for TDT actors; None for normal actors.
-    // local_bmdls = pre-extracted BMDL (ctg,cno) keys from lf.cfl for sid=0 non-TDT actors.
+    // local_bmdls = pre-extracted BMDL children from lf.cfl for sid=0 non-TDT actors.
     // Extracted while holding the loaded_file lock so Step 2 needs no re-lock.
-    // Tuple: (ctg, cno, sid, transform, tdt_data, local_bmdls)
     // Also returns bkgd_cno extracted from the GGST start-of-scene events.
-    let (tag_tmpls, bkgd_cno): (Vec<(u32, u32, i32, glam::Mat4, Option<(u32, Tdts, String)>, Vec<(u32,u32)>)>, Option<u32>) = {
+    let (tag_tmpls, bkgd_cno): (Vec<ActorRenderEntry>, Option<u32>) = {
         let guard = state.loaded_file.lock().unwrap();
         let lf = guard.as_ref().ok_or("No file loaded")?;
 
-        let scen_chunk = lf.cfl.chunks.iter()
+        let scen_chunk = lf
+            .cfl
+            .chunks
+            .iter()
             .filter(|c| c.id.ctg == CTG_SCEN)
             .nth(scene_idx)
             .ok_or_else(|| format!("Scene index {scene_idx} out of range"))?;
 
         // Extract BKGD cno from GGST (start-of-scene events, chid=1).
         // The sevtSetBkgd entry (sevt==4) carries a 16-byte TagOnFile: {sid,pcrf,ctg,cno}.
-        let bkgd_cno: Option<u32> = scen_chunk.children.iter()
+        let bkgd_cno: Option<u32> = scen_chunk
+            .children
+            .iter()
             .find(|ch| ch.id.ctg == CTG_GGST)
             .and_then(|ggst_ref| lf.cfl.get_chunk_data(ggst_ref.id.ctg, ggst_ref.id.cno).ok())
             .and_then(|raw| GenericGroup::read(&raw).ok())
             .and_then(|gg| {
                 // SEV fixed entry: {nfrm: i32, sevt: i32} = 8 bytes; sevtSetBkgd == 4
-                gg.fixed_entries.iter().zip(gg.variable_entries.iter())
-                    .find(|(fe, _)| fe.len() >= 8 && i32::from_le_bytes(fe[4..8].try_into().unwrap()) == 4)
+                gg.fixed_entries
+                    .iter()
+                    .zip(gg.variable_entries.iter())
+                    .find(|(fe, _)| {
+                        fe.len() >= 8 && i32::from_le_bytes(fe[4..8].try_into().unwrap()) == 4
+                    })
                     .and_then(|(_, ve)| {
                         // Variable = TagOnFile: [sid:4][pcrf:4][ctg:4][cno:4] = 16 bytes
                         if ve.len() >= 16 {
@@ -385,7 +514,9 @@ pub(crate) fn render_to_rgba(
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            if data.len() < ActorOnFile::SIZE { continue; }
+            if data.len() < ActorOnFile::SIZE {
+                continue;
+            }
             let arr: [u8; 44] = data[..44].try_into().unwrap();
             let actf = match ActorOnFile::from_bytes(&arr) {
                 Ok(a) => a,
@@ -398,21 +529,23 @@ pub(crate) fn render_to_rgba(
                 }
 
                 let translation = 'path: {
-                    let actr_top = lf.cfl.chunks.iter()
+                    let actr_top = lf
+                        .cfl
+                        .chunks
+                        .iter()
                         .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
-                    let path_child = actr_top
-                        .and_then(|a| a.children.iter().find(|ch| ch.id.ctg == CTG_PATH));
+                    let path_child =
+                        actr_top.and_then(|a| a.children.iter().find(|ch| ch.id.ctg == CTG_PATH));
                     if let Some(pc) = path_child {
                         if let Ok(path_data) = lf.cfl.get_chunk_data(pc.id.ctg, pc.id.cno) {
                             const GL_HDR: usize = 12;
                             const RPT_SIZE: usize = RoutePoint::SIZE;
                             if path_data.len() >= GL_HDR + RPT_SIZE {
-                                let iv_mac = i32::from_le_bytes(
-                                    path_data[8..12].try_into().unwrap()
-                                );
+                                let iv_mac =
+                                    i32::from_le_bytes(path_data[8..12].try_into().unwrap());
                                 if iv_mac >= 1 {
-                                    let rpt_bytes: &[u8; 16] = path_data[GL_HDR..GL_HDR + RPT_SIZE]
-                                        .try_into().unwrap();
+                                    let rpt_bytes: &[u8; 16] =
+                                        path_data[GL_HDR..GL_HDR + RPT_SIZE].try_into().unwrap();
                                     let rpt = RoutePoint::from_le_bytes(rpt_bytes);
                                     let dx = actf.dxyz_full_rte.x;
                                     let dy = actf.dxyz_full_rte.y;
@@ -420,9 +553,9 @@ pub(crate) fn render_to_rgba(
                                     let x = (rpt.position.x.0 + dx.0) as f64 / 65536.0;
                                     let y = (rpt.position.y.0 + dy.0) as f64 / 65536.0;
                                     let z = (rpt.position.z.0 + dz.0) as f64 / 65536.0;
-                                    break 'path glam::Mat4::from_translation(
-                                        glam::Vec3::new(x as f32, y as f32, z as f32)
-                                    );
+                                    break 'path glam::Mat4::from_translation(glam::Vec3::new(
+                                        x as f32, y as f32, z as f32,
+                                    ));
                                 }
                             }
                         }
@@ -430,63 +563,93 @@ pub(crate) fn render_to_rgba(
                     glam::Mat4::IDENTITY
                 };
 
-                let rotation = 'ggae: {
-                    let actr_top = lf.cfl.chunks.iter()
+                let (rotation, cel_index) = 'ggae: {
+                    let actr_top = lf
+                        .cfl
+                        .chunks
+                        .iter()
                         .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
-                    let ggae_child = actr_top
-                        .and_then(|a| a.children.iter().find(|ch| ch.id.ctg == CTG_GGAE));
+                    let ggae_child =
+                        actr_top.and_then(|a| a.children.iter().find(|ch| ch.id.ctg == CTG_GGAE));
                     if let Some(gc) = ggae_child {
                         if let Ok(ggae_data) = lf.cfl.get_chunk_data(gc.id.ctg, gc.id.cno) {
                             if let Ok(gg) = GenericGroup::read(&ggae_data) {
                                 let mut last_rot: Option<glam::Mat4> = None;
-                                let mut last_nfrm = i32::MIN;
-                                for (fixed_bytes, var_bytes) in gg.fixed_entries.iter()
-                                    .zip(gg.variable_entries.iter())
+                                let mut last_rot_nfrm = i32::MIN;
+                                let mut last_cel = 0;
+                                let mut last_step_nfrm = i32::MIN;
+                                for (fixed_bytes, var_bytes) in
+                                    gg.fixed_entries.iter().zip(gg.variable_entries.iter())
                                 {
-                                    if fixed_bytes.len() < 20 { continue; }
-                                    let fixed_arr: &[u8; 20] = fixed_bytes[..20].try_into().unwrap();
+                                    if fixed_bytes.len() < 20 {
+                                        continue;
+                                    }
+                                    let fixed_arr: &[u8; 20] =
+                                        fixed_bytes[..20].try_into().unwrap();
                                     if let Ok(evt) = ActorEvent::parse(fixed_arr, var_bytes) {
-                                        if let EventPayload::Orient(op) = &evt.payload {
-                                            if evt.header.nfrm <= frame && evt.header.nfrm >= last_nfrm {
-                                                last_nfrm = evt.header.nfrm;
-                                                last_rot = Some(orient_to_rotation_mat4(op));
+                                        match &evt.payload {
+                                            EventPayload::Orient(op) => {
+                                                if evt.header.nfrm <= frame
+                                                    && evt.header.nfrm >= last_rot_nfrm
+                                                {
+                                                    last_rot_nfrm = evt.header.nfrm;
+                                                    last_rot = Some(orient_to_rotation_mat4(op));
+                                                }
                                             }
+                                            EventPayload::Step(step) => {
+                                                if evt.header.nfrm <= frame
+                                                    && evt.header.nfrm >= last_step_nfrm
+                                                {
+                                                    last_step_nfrm = evt.header.nfrm;
+                                                    last_cel = step.icel;
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
-                                if let Some(rot) = last_rot {
-                                    break 'ggae rot;
-                                }
+                                break 'ggae (last_rot.unwrap_or(glam::Mat4::IDENTITY), last_cel);
                             }
                         }
                     }
-                    glam::Mat4::IDENTITY
+                    (glam::Mat4::IDENTITY, 0)
                 };
 
                 // For TDT (3D text) actors: extract (tdf_cno, tdts, stn) while we hold
                 // the loaded_file lock so Step 2 can use them without re-locking.
                 let sid = actf.tag_tmpl.sid;
-                let (tdt_data, local_bmdls): (Option<(u32, Tdts, String)>, Vec<(u32,u32)>) =
+                let (tdt_data, local_bmdls): (Option<(u32, Tdts, String)>, Vec<ChildRef>) =
                     if actf.tag_tmpl.ctg == CTG_TMPL {
-                        let tmpl_local = lf.cfl.chunks.iter()
+                        let tmpl_local = lf
+                            .cfl
+                            .chunks
+                            .iter()
                             .find(|c| c.id.ctg == CTG_TMPL && c.id.cno == actf.tag_tmpl.cno);
                         if let Some(tmpl) = tmpl_local {
                             // Try TDT path first
-                            let tdt = tmpl.children.iter().find(|ch| ch.id.ctg == CTG_TDT)
+                            let tdt = tmpl
+                                .children
+                                .iter()
+                                .find(|ch| ch.id.ctg == CTG_TDT)
                                 .and_then(|tdt_child| {
-                                    let tdt_bytes = lf.cfl.get_chunk_data(CTG_TDT, tdt_child.id.cno).ok()?;
+                                    let tdt_bytes =
+                                        lf.cfl.get_chunk_data(CTG_TDT, tdt_child.id.cno).ok()?;
                                     let tdt = BrTdt::from_bytes(&tdt_bytes).ok()?;
                                     let stn = tmpl.name.clone().unwrap_or_default();
-                                    if stn.is_empty() { return None; }
+                                    if stn.is_empty() {
+                                        return None;
+                                    }
                                     Some((tdt.tag_tdf.cno, tdt.tdts, stn))
                                 });
                             if tdt.is_some() {
                                 (tdt, vec![])
                             } else {
                                 // sid=0 non-TDT: extract local BMDL keys now while lock held
-                                let bmdls: Vec<(u32,u32)> = tmpl.children.iter()
+                                let bmdls: Vec<ChildRef> = tmpl
+                                    .children
+                                    .iter()
                                     .filter(|ch| ch.id.ctg == CTG_BMDL)
-                                    .map(|ch| (CTG_BMDL, ch.id.cno))
+                                    .copied()
                                     .collect();
                                 (None, bmdls)
                             }
@@ -496,7 +659,15 @@ pub(crate) fn render_to_rgba(
                     } else {
                         (None, vec![])
                     };
-                tags.push((actf.tag_tmpl.ctg, actf.tag_tmpl.cno, sid, translation * rotation, tdt_data, local_bmdls));
+                tags.push(ActorRenderEntry {
+                    ctg: actf.tag_tmpl.ctg,
+                    cno: actf.tag_tmpl.cno,
+                    sid,
+                    transform: translation * rotation,
+                    cel_index,
+                    tdt_data,
+                    local_bmdls,
+                });
             }
         }
         (tags, bkgd_cno)
@@ -510,7 +681,10 @@ pub(crate) fn render_to_rgba(
     // If we extracted a BKGD cno, look up its CAM child and build a Camera.
     let scene_camera: Option<Camera> = bkgd_cno.and_then(|cno| {
         let bkgds = state.bkgds.lock().unwrap().clone()?;
-        let bkgd_chunk = bkgds.chunks.iter().find(|c| c.id.ctg == CTG_BKGD && c.id.cno == cno)?;
+        let bkgd_chunk = bkgds
+            .chunks
+            .iter()
+            .find(|c| c.id.ctg == CTG_BKGD && c.id.cno == cno)?;
         let cam_ref = bkgd_chunk.children.iter().find(|ch| ch.id.ctg == CTG_CAM)?;
         let cam_data = bkgds.get_chunk_data(CTG_CAM, cam_ref.id.cno).ok()?;
         let br_cam = BrCamera::from_bytes(&cam_data).ok()?;
@@ -518,22 +692,33 @@ pub(crate) fn render_to_rgba(
     });
 
     // --- Step 2: look up cached tmpls.3cn + GPU renderer ---------------------
-    let tmpls = state.tmpls.lock().unwrap().clone()
+    let tmpls = state
+        .tmpls
+        .lock()
+        .unwrap()
+        .clone()
         .ok_or_else(|| "tmpls.3cn not loaded".to_string())?;
     let tdfs = state.tdfs.lock().unwrap().clone();
 
     let mut gpu_guard = state.gpu.lock().unwrap();
-    let gpu = gpu_guard.as_mut()
+    let gpu = gpu_guard
+        .as_mut()
         .ok_or_else(|| "No GPU adapter available".to_string())?;
 
-    let mut scene_entries: Vec<((u32, u32), glam::Mat4)> = Vec::new();
+    let mut scene_entries: Vec<((u32, u32), glam::Mat4, Option<(u32, u32)>)> = Vec::new();
     let mut diag: Vec<String> = Vec::new();
 
-    for (ctg, cno, sid, transform, tdt_data, local_bmdls) in &tag_tmpls {
-        let (ctg, cno, sid, transform) = (*ctg, *cno, *sid, *transform);
+    for entry in &tag_tmpls {
+        let (ctg, cno, sid, transform, cel_index) = (
+            entry.ctg,
+            entry.cno,
+            entry.sid,
+            entry.transform,
+            entry.cel_index,
+        );
 
         // --- TDT (3D text) path — fan-movie actors with per-char glyph BMDLs ---
-        if let Some((tdf_cno, tdts, stn)) = tdt_data {
+        if let Some((tdf_cno, tdts, stn)) = &entry.tdt_data {
             let tdf_cno = *tdf_cno;
             let tdts = *tdts;
             match &tdfs {
@@ -543,7 +728,9 @@ pub(crate) fn render_to_rgba(
                 }
                 Some(tdfs_cfl) => {
                     // Find TDF font chunk in tdfs.3cn
-                    let tdf_chunk = match tdfs_cfl.chunks.iter()
+                    let tdf_chunk = match tdfs_cfl
+                        .chunks
+                        .iter()
                         .find(|c| c.id.ctg == CTG_TDF && c.id.cno == tdf_cno)
                     {
                         Some(c) => c,
@@ -554,7 +741,8 @@ pub(crate) fn render_to_rgba(
                     };
 
                     // Parse TDF font metrics
-                    let tdf = match tdfs_cfl.get_chunk_data(CTG_TDF, tdf_cno)
+                    let tdf = match tdfs_cfl
+                        .get_chunk_data(CTG_TDF, tdf_cno)
                         .ok()
                         .and_then(|d| BrTdf::from_bytes(&d).ok())
                     {
@@ -566,7 +754,8 @@ pub(crate) fn render_to_rgba(
                     };
 
                     // Compute per-char transforms for the requested shape variant
-                    let char_transforms = compose_layout(stn, tdts, &tdf.dxr, &tdf.dyr, tdf.dyr_max);
+                    let char_transforms =
+                        compose_layout(stn, tdts, &tdf.dxr, &tdf.dyr, tdf.dyr_max);
                     if char_transforms.is_empty() {
                         diag.push(format!("TMPL:{cno} stn has no printable chars"));
                         continue;
@@ -576,7 +765,9 @@ pub(crate) fn render_to_rgba(
                     let printable: Vec<u8> = stn.bytes().filter(|&b| b >= 0x20).collect();
                     let mut any_rendered = false;
                     for (i, &ch) in printable.iter().enumerate() {
-                        let glyph_child = match tdf_chunk.children.iter()
+                        let glyph_child = match tdf_chunk
+                            .children
+                            .iter()
                             .find(|c| c.id.ctg == CTG_BMDL && c.chid == ch as u32)
                         {
                             Some(c) => c,
@@ -585,14 +776,21 @@ pub(crate) fn render_to_rgba(
 
                         let bmdl_key = (CTG_BMDL, glyph_child.id.cno);
                         if !gpu.has_mesh(bmdl_key) {
-                            if let Ok(data) = tdfs_cfl.get_chunk_data(CTG_BMDL, glyph_child.id.cno) {
+                            if let Ok(data) = tdfs_cfl.get_chunk_data(CTG_BMDL, glyph_child.id.cno)
+                            {
                                 if let Ok(m) = Model::from_bytes(&data) {
                                     gpu.ensure_mesh(bmdl_key, &m);
                                 }
                             }
                         }
                         if gpu.has_mesh(bmdl_key) {
-                            scene_entries.push((bmdl_key, transform * char_transforms[i]));
+                            let texture_key =
+                                ensure_parent_texture(gpu, tdfs_cfl, CTG_TDF, tdf_cno);
+                            scene_entries.push((
+                                bmdl_key,
+                                transform * char_transforms[i],
+                                texture_key,
+                            ));
                             any_rendered = true;
                         }
                     }
@@ -605,26 +803,41 @@ pub(crate) fn render_to_rgba(
         }
 
         // --- sid=0 non-TDT local TMPL: use pre-extracted BMDL keys from lf.cfl ----
-        if !local_bmdls.is_empty() {
+        if !entry.local_bmdls.is_empty() {
             let guard = state.loaded_file.lock().unwrap();
             let lf = match guard.as_ref() {
                 Some(l) => l,
-                None => { diag.push(format!("TMPL:{cno} sid=0 but no file loaded")); continue; }
+                None => {
+                    diag.push(format!("TMPL:{cno} sid=0 but no file loaded"));
+                    continue;
+                }
             };
+            let (selected_child, used_fallback) =
+                select_bmdl_child_for_cel(&entry.local_bmdls, cel_index);
+            if used_fallback {
+                diag.push(format!(
+                    "TMPL:{cno} cel {cel_index} has no local BMDL child; using cel 0"
+                ));
+            }
             let mut found_key: Option<(u32, u32)> = None;
-            for &bmdl_key in local_bmdls {
-                if gpu.has_mesh(bmdl_key) { found_key = Some(bmdl_key); break; }
-                if let Ok(data) = lf.cfl.get_chunk_data(bmdl_key.0, bmdl_key.1) {
+            if let Some(child) = selected_child {
+                let bmdl_key = (child.id.ctg, child.id.cno);
+                if gpu.has_mesh(bmdl_key) {
+                    found_key = Some(bmdl_key);
+                } else if let Ok(data) = lf.cfl.get_chunk_data(bmdl_key.0, bmdl_key.1) {
                     if data.len() >= 80 {
                         if let Ok(m) = Model::from_bytes(&data) {
                             gpu.ensure_mesh(bmdl_key, &m);
-                            if gpu.has_mesh(bmdl_key) { found_key = Some(bmdl_key); break; }
+                            if gpu.has_mesh(bmdl_key) {
+                                found_key = Some(bmdl_key);
+                            }
                         }
                     }
                 }
             }
+            let texture_key = ensure_parent_texture(gpu, &lf.cfl, CTG_TMPL, cno);
             match found_key {
-                Some(k) => scene_entries.push((k, transform)),
+                Some(k) => scene_entries.push((k, transform, texture_key)),
                 None => diag.push(format!("TMPL:{cno} sid=0 — no renderable local BMDL")),
             }
             continue;
@@ -632,34 +845,47 @@ pub(crate) fn render_to_rgba(
 
         if ctg == CTG_TMPL {
             // --- primary path: look up TMPL in tmpls.3cn (sid>0 external) ---
-            let tmpl_opt = tmpls.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == cno);
+            let tmpl_opt = tmpls
+                .chunks
+                .iter()
+                .find(|c| c.id.ctg == CTG_TMPL && c.id.cno == cno);
             if let Some(tmpl) = tmpl_opt {
-                let bmdl_children: Vec<_> = tmpl.children.iter().filter(|ch| ch.id.ctg == CTG_BMDL).collect();
+                let bmdl_children: Vec<ChildRef> = tmpl
+                    .children
+                    .iter()
+                    .filter(|ch| ch.id.ctg == CTG_BMDL)
+                    .copied()
+                    .collect();
                 if bmdl_children.is_empty() {
                     diag.push(format!("TMPL:{cno} has no BMDL children"));
                     continue;
                 }
+                let (selected_child, used_fallback) =
+                    select_bmdl_child_for_cel(&bmdl_children, cel_index);
+                if used_fallback {
+                    diag.push(format!(
+                        "TMPL:{cno} cel {cel_index} has no BMDL child; using cel 0"
+                    ));
+                }
                 let mut found_key: Option<(u32, u32)> = None;
-                for ch in &bmdl_children {
-                    let bmdl_key = (CTG_BMDL, ch.id.cno);
+                if let Some(ch) = selected_child {
+                    let bmdl_key = (ch.id.ctg, ch.id.cno);
                     if gpu.has_mesh(bmdl_key) {
                         found_key = Some(bmdl_key);
-                        break;
-                    }
-                    if let Ok(data) = tmpls.get_chunk_data(ch.id.ctg, ch.id.cno) {
+                    } else if let Ok(data) = tmpls.get_chunk_data(ch.id.ctg, ch.id.cno) {
                         if data.len() >= 80 {
                             if let Ok(m) = Model::from_bytes(&data) {
                                 gpu.ensure_mesh(bmdl_key, &m);
                                 if gpu.has_mesh(bmdl_key) {
                                     found_key = Some(bmdl_key);
-                                    break;
                                 }
                             }
                         }
                     }
                 }
+                let texture_key = ensure_parent_texture(gpu, &tmpls, CTG_TMPL, cno);
                 match found_key {
-                    Some(k) => scene_entries.push((k, transform)),
+                    Some(k) => scene_entries.push((k, transform, texture_key)),
                     None => diag.push(format!("TMPL:{cno} — no renderable BMDL child")),
                 }
                 continue;
@@ -678,12 +904,14 @@ pub(crate) fn render_to_rgba(
                 }
             }
             if gpu.has_mesh(bmdl_key) {
-                scene_entries.push((bmdl_key, transform));
+                scene_entries.push((bmdl_key, transform, None));
             } else {
                 diag.push(format!("direct BMDL:{cno} not renderable"));
             }
         } else {
-            let ctg_str: String = ctg.to_be_bytes().iter()
+            let ctg_str: String = ctg
+                .to_be_bytes()
+                .iter()
                 .map(|&b: &u8| if b.is_ascii_graphic() { b as char } else { '.' })
                 .collect();
             diag.push(format!("actor ctg='{}' cno={cno} — not TMPL/BMDL", ctg_str));
@@ -691,8 +919,14 @@ pub(crate) fn render_to_rgba(
     }
 
     if scene_entries.is_empty() {
-        return Err(format!("No renderable model: {}",
-            if diag.is_empty() { "no actors matched".into() } else { diag.join("; ") }));
+        return Err(format!(
+            "No renderable model: {}",
+            if diag.is_empty() {
+                "no actors matched".into()
+            } else {
+                diag.join("; ")
+            }
+        ));
     }
 
     // --- Step 3: GPU render --------------------------------------------------
@@ -723,15 +957,17 @@ pub fn render_scene_frame(
 /// List sound entries from snds.3cn.
 #[tauri::command]
 pub fn list_sounds(state: State<AppState>) -> Result<Vec<SoundEntry>, String> {
-    let content_dir = state.content_dir.lock().unwrap().clone()
+    let content_dir = state
+        .content_dir
+        .lock()
+        .unwrap()
+        .clone()
         .ok_or_else(|| "Content directory not set".to_string())?;
 
     let snds_path = content_dir.join("snds.3cn");
-    let file = std::fs::File::open(&snds_path)
-        .map_err(|e| format!("Cannot open snds.3cn: {e}"))?;
+    let file = std::fs::File::open(&snds_path).map_err(|e| format!("Cannot open snds.3cn: {e}"))?;
     let mut reader = BufReader::new(file);
-    let cfl = ChunkyFile::read(&mut reader)
-        .map_err(|e| format!("Parse snds.3cn: {e}"))?;
+    let cfl = ChunkyFile::read(&mut reader).map_err(|e| format!("Parse snds.3cn: {e}"))?;
 
     let mut sounds: Vec<SoundEntry> = Vec::new();
 
@@ -770,31 +1006,37 @@ pub fn list_sounds(state: State<AppState>) -> Result<Vec<SoundEntry>, String> {
 /// Play the WAV audio for the given MSND cno from snds.3cn.
 #[tauri::command]
 pub fn play_sound(cno: u32, state: State<AppState>) -> Result<(), String> {
-    let content_dir = state.content_dir.lock().unwrap().clone()
+    let content_dir = state
+        .content_dir
+        .lock()
+        .unwrap()
+        .clone()
         .ok_or_else(|| "Content directory not set".to_string())?;
 
     let snds_path = content_dir.join("snds.3cn");
-    let file = std::fs::File::open(&snds_path)
-        .map_err(|e| format!("Cannot open snds.3cn: {e}"))?;
+    let file = std::fs::File::open(&snds_path).map_err(|e| format!("Cannot open snds.3cn: {e}"))?;
     let mut reader = BufReader::new(file);
-    let cfl = ChunkyFile::read(&mut reader)
-        .map_err(|e| format!("Parse snds.3cn: {e}"))?;
+    let cfl = ChunkyFile::read(&mut reader).map_err(|e| format!("Parse snds.3cn: {e}"))?;
 
     // Find the MSND with the given cno.
-    let msnd_chunk = cfl.chunks.iter()
+    let msnd_chunk = cfl
+        .chunks
+        .iter()
         .find(|c| c.id.ctg == CTG_MSND && c.id.cno == cno)
         .ok_or_else(|| format!("MSND cno={cno} not found"))?;
 
     // Find the WAVE child (chid = 0).
-    let wave_child = msnd_chunk.children.iter()
+    let wave_child = msnd_chunk
+        .children
+        .iter()
         .find(|ch| ch.id.ctg == CTG_WAVE)
         .ok_or_else(|| format!("No WAVE child in MSND cno={cno}"))?;
 
-    let wave_data = cfl.get_chunk_data(wave_child.id.ctg, wave_child.id.cno)
+    let wave_data = cfl
+        .get_chunk_data(wave_child.id.ctg, wave_child.id.cno)
         .map_err(|e| format!("Cannot get WAVE data: {e}"))?;
 
-    let (_, samples) = decode_wav(&wave_data)
-        .map_err(|e| format!("WAV decode error: {e}"))?;
+    let (_, samples) = decode_wav(&wave_data).map_err(|e| format!("WAV decode error: {e}"))?;
 
     // Build a minimal in-memory WAV (16-bit PCM) for rodio.
     let pcm_wav = build_pcm_wav(&samples, 22050, 1);
@@ -841,19 +1083,29 @@ pub fn get_scene_actors(
     let guard = state.loaded_file.lock().unwrap();
     let lf = guard.as_ref().ok_or("No file loaded")?;
 
-    let scen = lf.cfl.chunks.iter()
+    let scen = lf
+        .cfl
+        .chunks
+        .iter()
         .filter(|c| c.id.ctg == CTG_SCEN)
         .nth(scene_idx)
         .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
 
     let mut actors = Vec::new();
-    for (idx, child) in scen.children.iter().filter(|c| c.id.ctg == CTG_ACTR).enumerate() {
+    for (idx, child) in scen
+        .children
+        .iter()
+        .filter(|c| c.id.ctg == CTG_ACTR)
+        .enumerate()
+    {
         let cno = child.id.cno;
         let raw = match lf.cfl.get_chunk_data(CTG_ACTR, cno) {
             Ok(d) => d,
             Err(_) => continue,
         };
-        if raw.len() < ActorOnFile::SIZE { continue; }
+        if raw.len() < ActorOnFile::SIZE {
+            continue;
+        }
 
         let arr: [u8; 44] = raw[..44].try_into().unwrap();
         let actor = match ActorOnFile::from_bytes(&arr) {
@@ -871,15 +1123,21 @@ pub fn get_scene_actors(
         let mut ya_deg = 0.0f32;
         let mut za_deg = 0.0f32;
         {
-            let actr_top = lf.cfl.chunks.iter()
+            let actr_top = lf
+                .cfl
+                .chunks
+                .iter()
                 .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == cno);
             if let Some(actr) = actr_top {
                 if let Some(ggae_ref) = actr.children.iter().find(|ch| ch.id.ctg == CTG_GGAE) {
                     if let Ok(ggae_data) = lf.cfl.get_chunk_data(ggae_ref.id.ctg, ggae_ref.id.cno) {
                         if let Ok(gg) = GenericGroup::read(&ggae_data) {
                             let mut best_nfrm = i32::MAX;
-                            for (fe, ve) in gg.fixed_entries.iter().zip(gg.variable_entries.iter()) {
-                                if fe.len() < 20 { continue; }
+                            for (fe, ve) in gg.fixed_entries.iter().zip(gg.variable_entries.iter())
+                            {
+                                if fe.len() < 20 {
+                                    continue;
+                                }
                                 let fixed_arr: &[u8; 20] = fe[..20].try_into().unwrap();
                                 if let Ok(evt) = ActorEvent::parse(fixed_arr, ve) {
                                     if let EventPayload::Orient(op) = &evt.payload {
@@ -933,23 +1191,32 @@ pub fn update_actor_position(
 
     // Resolve (scene_idx, actor_idx) → ACTR cno
     let actr_cno = {
-        let scen = lf.cfl.chunks.iter()
+        let scen = lf
+            .cfl
+            .chunks
+            .iter()
             .filter(|c| c.id.ctg == CTG_SCEN)
             .nth(scene_idx)
             .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
-        scen.children.iter()
+        scen.children
+            .iter()
             .filter(|c| c.id.ctg == CTG_ACTR)
             .nth(actor_idx)
             .ok_or_else(|| format!("Actor {actor_idx} not found in scene {scene_idx}"))?
-            .id.cno
+            .id
+            .cno
     };
 
-    let mut data = lf.cfl
+    let mut data = lf
+        .cfl
         .get_chunk_data(CTG_ACTR, actr_cno)
         .map_err(|e| format!("ACTR cno={actr_cno}: {e}"))?;
 
     if data.len() < ActorOnFile::SIZE {
-        return Err(format!("ACTR chunk cno={actr_cno} too small: {} bytes", data.len()));
+        return Err(format!(
+            "ACTR chunk cno={actr_cno} too small: {} bytes",
+            data.len()
+        ));
     }
 
     // Write dxyz_full_rte directly as BRS 16.16 fixed-point i32 at offsets 4-15
@@ -963,7 +1230,10 @@ pub fn update_actor_position(
     let new_cb = data.len() as u32;
     lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), data);
 
-    if let Some(entry) = lf.cfl.chunks.iter_mut()
+    if let Some(entry) = lf
+        .cfl
+        .chunks
+        .iter_mut()
         .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == actr_cno)
     {
         entry.flags.remove(ChunkFlags::PACKED);
@@ -988,23 +1258,32 @@ pub fn update_actor_frame_range(
     let lf = guard.as_mut().ok_or("No file loaded")?;
 
     let actr_cno = {
-        let scen = lf.cfl.chunks.iter()
+        let scen = lf
+            .cfl
+            .chunks
+            .iter()
             .filter(|c| c.id.ctg == CTG_SCEN)
             .nth(scene_idx)
             .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
-        scen.children.iter()
+        scen.children
+            .iter()
             .filter(|c| c.id.ctg == CTG_ACTR)
             .nth(actor_idx)
             .ok_or_else(|| format!("Actor {actor_idx} not found in scene {scene_idx}"))?
-            .id.cno
+            .id
+            .cno
     };
 
-    let mut data = lf.cfl
+    let mut data = lf
+        .cfl
         .get_chunk_data(CTG_ACTR, actr_cno)
         .map_err(|e| format!("ACTR cno={actr_cno}: {e}"))?;
 
     if data.len() < ActorOnFile::SIZE {
-        return Err(format!("ACTR chunk cno={actr_cno} too small: {} bytes", data.len()));
+        return Err(format!(
+            "ACTR chunk cno={actr_cno} too small: {} bytes",
+            data.len()
+        ));
     }
 
     // nfrm_first=[20..24], nfrm_last=[24..28]
@@ -1014,7 +1293,10 @@ pub fn update_actor_frame_range(
     let new_cb = data.len() as u32;
     lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), data);
 
-    if let Some(entry) = lf.cfl.chunks.iter_mut()
+    if let Some(entry) = lf
+        .cfl
+        .chunks
+        .iter_mut()
         .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == actr_cno)
     {
         entry.flags.remove(ChunkFlags::PACKED);
@@ -1041,34 +1323,45 @@ pub fn update_actor_orientation(
 
     // Resolve (scene_idx, actor_idx) → ACTR cno
     let actr_cno = {
-        let scen = lf.cfl.chunks.iter()
+        let scen = lf
+            .cfl
+            .chunks
+            .iter()
             .filter(|c| c.id.ctg == CTG_SCEN)
             .nth(scene_idx)
             .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
-        scen.children.iter()
+        scen.children
+            .iter()
             .filter(|c| c.id.ctg == CTG_ACTR)
             .nth(actor_idx)
             .ok_or_else(|| format!("Actor {actor_idx} not found in scene {scene_idx}"))?
-            .id.cno
+            .id
+            .cno
     };
 
     // Find GGAE child cno
     let ggae_cno = {
-        let actr_top = lf.cfl.chunks.iter()
+        let actr_top = lf
+            .cfl
+            .chunks
+            .iter()
             .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == actr_cno)
             .ok_or_else(|| format!("ACTR top-level chunk cno={actr_cno} not found"))?;
-        actr_top.children.iter()
+        actr_top
+            .children
+            .iter()
             .find(|ch| ch.id.ctg == CTG_GGAE)
             .ok_or_else(|| format!("Actor {actor_idx} has no GGAE chunk; cannot set orientation"))?
-            .id.cno
+            .id
+            .cno
     };
 
-    let ggae_raw = lf.cfl
+    let ggae_raw = lf
+        .cfl
         .get_chunk_data(CTG_GGAE, ggae_cno)
         .map_err(|e| format!("GGAE cno={ggae_cno}: {e}"))?;
 
-    let mut gg = GenericGroup::read(&ggae_raw)
-        .map_err(|e| format!("Parse GGAE: {e}"))?;
+    let mut gg = GenericGroup::read(&ggae_raw).map_err(|e| format!("Parse GGAE: {e}"))?;
 
     let new_orient = OrientPayload {
         xa: FixedAngle::from_degrees(xa_deg as f64),
@@ -1078,9 +1371,11 @@ pub fn update_actor_orientation(
 
     // Find existing Orient event at nfrm=0
     let orient_idx = gg.fixed_entries.iter().position(|fe| {
-        if fe.len() < 8 { return false; }
+        if fe.len() < 8 {
+            return false;
+        }
         let aet_val = i32::from_le_bytes(fe[0..4].try_into().unwrap());
-        let nfrm   = i32::from_le_bytes(fe[4..8].try_into().unwrap());
+        let nfrm = i32::from_le_bytes(fe[4..8].try_into().unwrap());
         aet_val == aet::ORIENT && nfrm == 0
     });
 
@@ -1101,7 +1396,10 @@ pub fn update_actor_orientation(
     let new_cb = written.len() as u32;
     lf.cfl.chunk_data.insert((CTG_GGAE, ggae_cno), written);
 
-    if let Some(entry) = lf.cfl.chunks.iter_mut()
+    if let Some(entry) = lf
+        .cfl
+        .chunks
+        .iter_mut()
         .find(|c| c.id.ctg == CTG_GGAE && c.id.cno == ggae_cno)
     {
         entry.flags.remove(ChunkFlags::PACKED);
@@ -1123,11 +1421,12 @@ pub fn save_file(path: Option<String>, state: State<AppState>) -> Result<String,
         None => lf.path.clone(),
     };
 
-    let bytes = lf.cfl.to_bytes_passthrough()
+    let bytes = lf
+        .cfl
+        .to_bytes_passthrough()
         .map_err(|e| format!("Serialize error: {e}"))?;
 
-    std::fs::write(&save_path, &bytes)
-        .map_err(|e| format!("Write failed: {e}"))?;
+    std::fs::write(&save_path, &bytes).map_err(|e| format!("Write failed: {e}"))?;
 
     Ok(save_path.to_string_lossy().into_owned())
 }
@@ -1146,17 +1445,27 @@ pub struct TemplateInfo {
 /// List all TMPL chunks in the loaded tmpls.3cn content library.
 #[tauri::command]
 pub fn list_templates(state: State<AppState>) -> Result<Vec<TemplateInfo>, String> {
-    let tmpls = state.tmpls.lock().unwrap().clone()
+    let tmpls = state
+        .tmpls
+        .lock()
+        .unwrap()
+        .clone()
         .ok_or_else(|| "tmpls.3cn not loaded".to_string())?;
-    Ok(tmpls.chunks.iter()
+    Ok(tmpls
+        .chunks
+        .iter()
         .filter(|c| c.id.ctg == CTG_TMPL)
-        .map(|c| TemplateInfo { cno: c.id.cno, name: c.name.clone() })
+        .map(|c| TemplateInfo {
+            cno: c.id.cno,
+            name: c.name.clone(),
+        })
         .collect())
 }
 
 /// Allocate the next cno for a given chunk type (max existing + 1, floor 1).
 fn next_cno(cfl: &ChunkyFile, ctg: u32) -> u32 {
-    cfl.chunks.iter()
+    cfl.chunks
+        .iter()
         .filter(|c| c.id.ctg == ctg)
         .map(|c| c.id.cno)
         .max()
@@ -1198,58 +1507,111 @@ pub fn add_actor(
     // arid = 0 at [16..20] (already zero)
     actr_bytes[20..24].copy_from_slice(&1i32.to_le_bytes()); // nfrm_first = 1
     actr_bytes[24..28].copy_from_slice(&1i32.to_le_bytes()); // nfrm_last  = 1
-    // tag_tmpl: [sid:4][_pcrf:4][ctg:4][cno:4] at [28..44]
-    // sid and _pcrf stay zero
+                                                             // tag_tmpl: [sid:4][_pcrf:4][ctg:4][cno:4] at [28..44]
+                                                             // sid and _pcrf stay zero
     actr_bytes[36..40].copy_from_slice(&CTG_TMPL.to_le_bytes());
     actr_bytes[40..44].copy_from_slice(&tmpl_cno.to_le_bytes());
 
     // Build empty PATH (GL: [entry_size=16][count=0][bo=1][osk=0] = 12 bytes)
-    let path_bytes = GenericList { entry_size: 16, bo: 1, osk: 0, entries: vec![] }.write();
+    let path_bytes = GenericList {
+        entry_size: 16,
+        bo: 1,
+        osk: 0,
+        entries: vec![],
+    }
+    .write();
 
     // Build empty GGAE (GG: [fixed_size=20][count=0][bo=1][osk=0] = 12 bytes)
     let ggae_bytes = GenericGroup {
-        fixed_size: 20, bo: 1, osk: 0,
-        fixed_entries: vec![], variable_entries: vec![],
-    }.write();
+        fixed_size: 20,
+        bo: 1,
+        osk: 0,
+        fixed_entries: vec![],
+        variable_entries: vec![],
+    }
+    .write();
 
     // Insert PATH
     lf.cfl.chunks.push(ChunkEntry {
-        id: ChunkId { ctg: CTG_PATH, cno: path_cno },
-        fp: 0, cb: path_bytes.len() as u32,
-        flags: ChunkFlags::NONE, child_count: 0, ref_count: 0, rti: 0,
-        children: vec![], name: None,
+        id: ChunkId {
+            ctg: CTG_PATH,
+            cno: path_cno,
+        },
+        fp: 0,
+        cb: path_bytes.len() as u32,
+        flags: ChunkFlags::NONE,
+        child_count: 0,
+        ref_count: 0,
+        rti: 0,
+        children: vec![],
+        name: None,
     });
     lf.cfl.chunk_data.insert((CTG_PATH, path_cno), path_bytes);
 
     // Insert GGAE
     lf.cfl.chunks.push(ChunkEntry {
-        id: ChunkId { ctg: CTG_GGAE, cno: ggae_cno },
-        fp: 0, cb: ggae_bytes.len() as u32,
-        flags: ChunkFlags::NONE, child_count: 0, ref_count: 0, rti: 0,
-        children: vec![], name: None,
+        id: ChunkId {
+            ctg: CTG_GGAE,
+            cno: ggae_cno,
+        },
+        fp: 0,
+        cb: ggae_bytes.len() as u32,
+        flags: ChunkFlags::NONE,
+        child_count: 0,
+        ref_count: 0,
+        rti: 0,
+        children: vec![],
+        name: None,
     });
     lf.cfl.chunk_data.insert((CTG_GGAE, ggae_cno), ggae_bytes);
 
     // Insert ACTR with PATH + GGAE as children
     lf.cfl.chunks.push(ChunkEntry {
-        id: ChunkId { ctg: CTG_ACTR, cno: actr_cno },
-        fp: 0, cb: 44,
-        flags: ChunkFlags::NONE, child_count: 2, ref_count: 0, rti: 0,
+        id: ChunkId {
+            ctg: CTG_ACTR,
+            cno: actr_cno,
+        },
+        fp: 0,
+        cb: 44,
+        flags: ChunkFlags::NONE,
+        child_count: 2,
+        ref_count: 0,
+        rti: 0,
         children: vec![
-            ChildRef { id: ChunkId { ctg: CTG_PATH, cno: path_cno }, chid: 0 },
-            ChildRef { id: ChunkId { ctg: CTG_GGAE, cno: ggae_cno }, chid: 0 },
+            ChildRef {
+                id: ChunkId {
+                    ctg: CTG_PATH,
+                    cno: path_cno,
+                },
+                chid: 0,
+            },
+            ChildRef {
+                id: ChunkId {
+                    ctg: CTG_GGAE,
+                    cno: ggae_cno,
+                },
+                chid: 0,
+            },
         ],
         name: None,
     });
-    lf.cfl.chunk_data.insert((CTG_ACTR, actr_cno), actr_bytes.to_vec());
+    lf.cfl
+        .chunk_data
+        .insert((CTG_ACTR, actr_cno), actr_bytes.to_vec());
 
     // Register ACTR as a child of the target SCEN
-    let scen = lf.cfl.chunks.iter_mut()
+    let scen = lf
+        .cfl
+        .chunks
+        .iter_mut()
         .filter(|c| c.id.ctg == CTG_SCEN)
         .nth(scene_idx)
         .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
     scen.children.push(ChildRef {
-        id: ChunkId { ctg: CTG_ACTR, cno: actr_cno },
+        id: ChunkId {
+            ctg: CTG_ACTR,
+            cno: actr_cno,
+        },
         chid: 0,
     });
     scen.child_count = scen.children.len() as u32;
@@ -1269,46 +1631,68 @@ pub fn remove_actor(
 
     // Resolve actor_idx → ACTR cno
     let actr_cno = {
-        let scen = lf.cfl.chunks.iter()
+        let scen = lf
+            .cfl
+            .chunks
+            .iter()
             .filter(|c| c.id.ctg == CTG_SCEN)
             .nth(scene_idx)
             .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
-        scen.children.iter()
+        scen.children
+            .iter()
             .filter(|c| c.id.ctg == CTG_ACTR)
             .nth(actor_idx)
             .ok_or_else(|| format!("Actor {actor_idx} not found in scene {scene_idx}"))?
-            .id.cno
+            .id
+            .cno
     };
 
     // Collect PATH/GGAE cnos from ACTR's children before we remove the ACTR entry
     let (path_cno, ggae_cno) = {
-        let entry = lf.cfl.chunks.iter()
+        let entry = lf
+            .cfl
+            .chunks
+            .iter()
             .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == actr_cno);
-        let path = entry.and_then(|e| e.children.iter().find(|ch| ch.id.ctg == CTG_PATH)).map(|ch| ch.id.cno);
-        let ggae = entry.and_then(|e| e.children.iter().find(|ch| ch.id.ctg == CTG_GGAE)).map(|ch| ch.id.cno);
+        let path = entry
+            .and_then(|e| e.children.iter().find(|ch| ch.id.ctg == CTG_PATH))
+            .map(|ch| ch.id.cno);
+        let ggae = entry
+            .and_then(|e| e.children.iter().find(|ch| ch.id.ctg == CTG_GGAE))
+            .map(|ch| ch.id.cno);
         (path, ggae)
     };
 
     // Remove ACTR from SCEN child list
     {
-        let scen = lf.cfl.chunks.iter_mut()
+        let scen = lf
+            .cfl
+            .chunks
+            .iter_mut()
             .filter(|c| c.id.ctg == CTG_SCEN)
             .nth(scene_idx)
             .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
-        scen.children.retain(|c| !(c.id.ctg == CTG_ACTR && c.id.cno == actr_cno));
+        scen.children
+            .retain(|c| !(c.id.ctg == CTG_ACTR && c.id.cno == actr_cno));
         scen.child_count = scen.children.len() as u32;
     }
 
     // Remove chunk entries and raw data for ACTR, PATH, GGAE
-    lf.cfl.chunks.retain(|c| !(c.id.ctg == CTG_ACTR && c.id.cno == actr_cno));
+    lf.cfl
+        .chunks
+        .retain(|c| !(c.id.ctg == CTG_ACTR && c.id.cno == actr_cno));
     lf.cfl.chunk_data.remove(&(CTG_ACTR, actr_cno));
 
     if let Some(cno) = path_cno {
-        lf.cfl.chunks.retain(|c| !(c.id.ctg == CTG_PATH && c.id.cno == cno));
+        lf.cfl
+            .chunks
+            .retain(|c| !(c.id.ctg == CTG_PATH && c.id.cno == cno));
         lf.cfl.chunk_data.remove(&(CTG_PATH, cno));
     }
     if let Some(cno) = ggae_cno {
-        lf.cfl.chunks.retain(|c| !(c.id.ctg == CTG_GGAE && c.id.cno == cno));
+        lf.cfl
+            .chunks
+            .retain(|c| !(c.id.ctg == CTG_GGAE && c.id.cno == cno));
         lf.cfl.chunk_data.remove(&(CTG_GGAE, cno));
     }
 
@@ -1347,44 +1731,87 @@ pub fn create_movie(path: String, state: State<AppState>) -> Result<MovieInfo, S
 
     // ── GGFR: empty frame-events GG (SEV entry_size=8) ─────────────────────
     let ggfr_bytes = GenericGroup {
-        fixed_size: 8, bo: 1, osk: 0,
-        fixed_entries: vec![], variable_entries: vec![],
-    }.write();
+        fixed_size: 8,
+        bo: 1,
+        osk: 0,
+        fixed_entries: vec![],
+        variable_entries: vec![],
+    }
+    .write();
     cfl.chunks.push(ChunkEntry {
-        id: ChunkId { ctg: CTG_GGFR, cno: 1 },
-        fp: 0, cb: ggfr_bytes.len() as u32,
-        flags: ChunkFlags::NONE, child_count: 0, ref_count: 0, rti: 0,
-        children: vec![], name: None,
+        id: ChunkId {
+            ctg: CTG_GGFR,
+            cno: 1,
+        },
+        fp: 0,
+        cb: ggfr_bytes.len() as u32,
+        flags: ChunkFlags::NONE,
+        child_count: 0,
+        ref_count: 0,
+        rti: 0,
+        children: vec![],
+        name: None,
     });
     cfl.chunk_data.insert((CTG_GGFR, 1), ggfr_bytes);
 
     // ── GGST: empty start-events GG (SEV entry_size=8) ─────────────────────
     let ggst_bytes = GenericGroup {
-        fixed_size: 8, bo: 1, osk: 0,
-        fixed_entries: vec![], variable_entries: vec![],
-    }.write();
+        fixed_size: 8,
+        bo: 1,
+        osk: 0,
+        fixed_entries: vec![],
+        variable_entries: vec![],
+    }
+    .write();
     cfl.chunks.push(ChunkEntry {
-        id: ChunkId { ctg: CTG_GGST, cno: 1 },
-        fp: 0, cb: ggst_bytes.len() as u32,
-        flags: ChunkFlags::NONE, child_count: 0, ref_count: 0, rti: 0,
-        children: vec![], name: None,
+        id: ChunkId {
+            ctg: CTG_GGST,
+            cno: 1,
+        },
+        fp: 0,
+        cb: ggst_bytes.len() as u32,
+        flags: ChunkFlags::NONE,
+        child_count: 0,
+        ref_count: 0,
+        rti: 0,
+        children: vec![],
+        name: None,
     });
     cfl.chunk_data.insert((CTG_GGST, 1), ggst_bytes);
 
     // ── SCEN: 16b SCENH (nfrmFirst=1, nfrmLast=1, trans=transCut=0) ────────
     let mut scenh = [0u8; 16];
-    scenh[0..2].copy_from_slice(&1u16.to_le_bytes());  // bo = kboCur (LE)
-    scenh[2..4].copy_from_slice(&0u16.to_le_bytes());  // osk
-    scenh[4..8].copy_from_slice(&1i32.to_le_bytes());  // nfrmLast = 1
+    scenh[0..2].copy_from_slice(&1u16.to_le_bytes()); // bo = kboCur (LE)
+    scenh[2..4].copy_from_slice(&0u16.to_le_bytes()); // osk
+    scenh[4..8].copy_from_slice(&1i32.to_le_bytes()); // nfrmLast = 1
     scenh[8..12].copy_from_slice(&1i32.to_le_bytes()); // nfrmFirst = 1
     scenh[12..16].copy_from_slice(&0i32.to_le_bytes()); // trans = transCut = 0
     cfl.chunks.push(ChunkEntry {
-        id: ChunkId { ctg: CTG_SCEN, cno: 1 },
-        fp: 0, cb: 16,
-        flags: ChunkFlags::NONE, child_count: 2, ref_count: 0, rti: 0,
+        id: ChunkId {
+            ctg: CTG_SCEN,
+            cno: 1,
+        },
+        fp: 0,
+        cb: 16,
+        flags: ChunkFlags::NONE,
+        child_count: 2,
+        ref_count: 0,
+        rti: 0,
         children: vec![
-            ChildRef { id: ChunkId { ctg: CTG_GGFR, cno: 1 }, chid: 0 },
-            ChildRef { id: ChunkId { ctg: CTG_GGST, cno: 1 }, chid: 1 },
+            ChildRef {
+                id: ChunkId {
+                    ctg: CTG_GGFR,
+                    cno: 1,
+                },
+                chid: 0,
+            },
+            ChildRef {
+                id: ChunkId {
+                    ctg: CTG_GGST,
+                    cno: 1,
+                },
+                chid: 1,
+            },
         ],
         name: None,
     });
@@ -1393,14 +1820,22 @@ pub fn create_movie(path: String, state: State<AppState>) -> Result<MovieInfo, S
     // ── GST rollcall: 12b empty string table (cbExtra=28=MACTRF size) ───────
     let mut gst = [0u8; 12];
     gst[0..4].copy_from_slice(&28u32.to_le_bytes()); // cbExtra = SIZEOF(MACTRF)
-    gst[4..8].copy_from_slice(&0u32.to_le_bytes());  // istnMac = 0
+    gst[4..8].copy_from_slice(&0u32.to_le_bytes()); // istnMac = 0
     gst[8..10].copy_from_slice(&1u16.to_le_bytes()); // bo = LE
     gst[10..12].copy_from_slice(&0u16.to_le_bytes()); // osk
     cfl.chunks.push(ChunkEntry {
-        id: ChunkId { ctg: CTG_GST, cno: 1 },
-        fp: 0, cb: 12,
-        flags: ChunkFlags::NONE, child_count: 0, ref_count: 0, rti: 0,
-        children: vec![], name: None,
+        id: ChunkId {
+            ctg: CTG_GST,
+            cno: 1,
+        },
+        fp: 0,
+        cb: 12,
+        flags: ChunkFlags::NONE,
+        child_count: 0,
+        ref_count: 0,
+        rti: 0,
+        children: vec![],
+        name: None,
     });
     cfl.chunk_data.insert((CTG_GST, 1), gst.to_vec());
 
@@ -1411,12 +1846,31 @@ pub fn create_movie(path: String, state: State<AppState>) -> Result<MovieInfo, S
     mfp[4..6].copy_from_slice(&2i16.to_le_bytes()); // dver._swCur = kcvnCur = 2
     mfp[6..8].copy_from_slice(&1i16.to_le_bytes()); // dver._swBack = kcvnMin = 1
     cfl.chunks.push(ChunkEntry {
-        id: ChunkId { ctg: CTG_MVIE, cno: 1 },
-        fp: 0, cb: 8,
-        flags: ChunkFlags::NONE, child_count: 2, ref_count: 0, rti: 0,
+        id: ChunkId {
+            ctg: CTG_MVIE,
+            cno: 1,
+        },
+        fp: 0,
+        cb: 8,
+        flags: ChunkFlags::NONE,
+        child_count: 2,
+        ref_count: 0,
+        rti: 0,
         children: vec![
-            ChildRef { id: ChunkId { ctg: CTG_GST,  cno: 1 }, chid: 0 }, // rollcall chid=0
-            ChildRef { id: ChunkId { ctg: CTG_SCEN, cno: 1 }, chid: 0 }, // scene chid=0
+            ChildRef {
+                id: ChunkId {
+                    ctg: CTG_GST,
+                    cno: 1,
+                },
+                chid: 0,
+            }, // rollcall chid=0
+            ChildRef {
+                id: ChunkId {
+                    ctg: CTG_SCEN,
+                    cno: 1,
+                },
+                chid: 0,
+            }, // scene chid=0
         ],
         name: None,
     });
@@ -1428,7 +1882,8 @@ pub fn create_movie(path: String, state: State<AppState>) -> Result<MovieInfo, S
 
     // Parse scene list (1 scene, 0 actors, 0 frames)
     let pb = std::path::PathBuf::from(&path);
-    let file_name = pb.file_name()
+    let file_name = pb
+        .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.clone());
 
@@ -1438,7 +1893,11 @@ pub fn create_movie(path: String, state: State<AppState>) -> Result<MovieInfo, S
         scene_count: 1,
         total_frames: 0,
     };
-    let scenes = vec![SceneInfo { scene_idx: 0, frame_count: 0, actor_count: 0 }];
+    let scenes = vec![SceneInfo {
+        scene_idx: 0,
+        frame_count: 0,
+        actor_count: 0,
+    }];
 
     *state.loaded_file.lock().unwrap() = Some(LoadedFile {
         path: pb,
@@ -1470,12 +1929,12 @@ pub(crate) fn encode_rgba_to_bmp(rgba: &[u8], width: u32, height: u32) -> Vec<u8
     bmp[10..14].copy_from_slice(&54u32.to_le_bytes()); // pixel data offset
 
     // BITMAPINFOHEADER (40 bytes)
-    bmp[14..18].copy_from_slice(&40u32.to_le_bytes());   // biSize
+    bmp[14..18].copy_from_slice(&40u32.to_le_bytes()); // biSize
     bmp[18..22].copy_from_slice(&(width as i32).to_le_bytes());
     bmp[22..26].copy_from_slice(&(-(height as i32)).to_le_bytes()); // negative = top-down
-    bmp[26..28].copy_from_slice(&1u16.to_le_bytes());    // biPlanes
-    bmp[28..30].copy_from_slice(&24u16.to_le_bytes());   // biBitCount
-    // bytes 30-53: compression=0, sizeImage, DPI, clrUsed, clrImportant = 0
+    bmp[26..28].copy_from_slice(&1u16.to_le_bytes()); // biPlanes
+    bmp[28..30].copy_from_slice(&24u16.to_le_bytes()); // biBitCount
+                                                       // bytes 30-53: compression=0, sizeImage, DPI, clrUsed, clrImportant = 0
     bmp[34..38].copy_from_slice(&(pixel_data_size as u32).to_le_bytes());
 
     // Pixel data: RGBA → BGR, with row padding
@@ -1485,9 +1944,9 @@ pub(crate) fn encode_rgba_to_bmp(rgba: &[u8], width: u32, height: u32) -> Vec<u8
         for x in 0..width as usize {
             let src = (y * width as usize + x) * 4;
             let dst = row_dst + x * 3;
-            bmp[dst]     = rgba[src + 2]; // B
+            bmp[dst] = rgba[src + 2]; // B
             bmp[dst + 1] = rgba[src + 1]; // G
-            bmp[dst + 2] = rgba[src];     // R
+            bmp[dst + 2] = rgba[src]; // R
         }
     }
     bmp
@@ -1500,9 +1959,11 @@ fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, S
         let mut encoder = png::Encoder::new(&mut buf, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header()
+        let mut writer = encoder
+            .write_header()
             .map_err(|e| format!("PNG header: {e}"))?;
-        writer.write_image_data(rgba)
+        writer
+            .write_image_data(rgba)
             .map_err(|e| format!("PNG data: {e}"))?;
     }
     Ok(buf)
@@ -1524,13 +1985,13 @@ fn build_pcm_wav(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
     wav.extend_from_slice(&file_size.to_le_bytes());
     wav.extend_from_slice(b"WAVE");
     wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());   // chunk size
-    wav.extend_from_slice(&1u16.to_le_bytes());    // PCM
+    wav.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
     wav.extend_from_slice(&channels.to_le_bytes());
     wav.extend_from_slice(&sample_rate.to_le_bytes());
     wav.extend_from_slice(&byte_rate.to_le_bytes());
     wav.extend_from_slice(&block_align.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());   // bits per sample
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_size.to_le_bytes());
     for &s in samples {
@@ -1553,12 +2014,18 @@ fn find_content_dir(movie_path: &std::path::Path) -> Option<PathBuf> {
     let roots: Vec<PathBuf> = {
         let mut v = Vec::new();
         // Root 1: directory containing the movie file
-        if let Some(p) = movie_path.parent() { v.push(p.to_path_buf()); }
+        if let Some(p) = movie_path.parent() {
+            v.push(p.to_path_buf());
+        }
         // Root 2: current working directory
-        if let Ok(cwd) = std::env::current_dir() { v.push(cwd); }
+        if let Ok(cwd) = std::env::current_dir() {
+            v.push(cwd);
+        }
         // Root 3: directory containing the executable
         if let Ok(exe) = std::env::current_exe() {
-            if let Some(p) = exe.parent() { v.push(p.to_path_buf()); }
+            if let Some(p) = exe.parent() {
+                v.push(p.to_path_buf());
+            }
         }
         v
     };
@@ -1574,4 +2041,74 @@ fn find_content_dir(movie_path: &std::path::Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn empty_cfl(chunks: Vec<ChunkEntry>) -> ChunkyFile {
+        ChunkyFile {
+            header: ChunkyHeader {
+                magic: MAGIC_CHUNKY,
+                ctg_creator: CTG_CREATOR_3DMM,
+                version_current: VERSION_CURRENT,
+                version_back: VERSION_BACK,
+                byte_order: 1,
+                os_kind: 0,
+                fp_mac: 0,
+                fp_index: 0,
+                cb_index: 0,
+                fp_map: 0,
+                cb_map: 0,
+                reserved: [0; 23],
+            },
+            chunks,
+            chunk_data: HashMap::new(),
+            free_map: vec![],
+            raw_index: vec![],
+        }
+    }
+
+    fn chunk(ctg: u32, cno: u32, children: Vec<ChildRef>) -> ChunkEntry {
+        ChunkEntry {
+            id: ChunkId { ctg, cno },
+            fp: 0,
+            cb: 0,
+            flags: ChunkFlags::NONE,
+            child_count: children.len() as u32,
+            ref_count: 0,
+            rti: 0,
+            children,
+            name: None,
+        }
+    }
+
+    fn child(ctg: u32, cno: u32, chid: u32) -> ChildRef {
+        ChildRef {
+            id: ChunkId { ctg, cno },
+            chid,
+        }
+    }
+
+    #[test]
+    fn resolve_texture_key_uses_first_mtrl_child_and_chid_zero_tmap() {
+        let cfl = empty_cfl(vec![
+            chunk(
+                CTG_TMPL,
+                7,
+                vec![child(CTG_BMDL, 11, 0), child(CTG_MTRL, 20, 0), child(CTG_MTRL, 21, 0)],
+            ),
+            chunk(
+                CTG_MTRL,
+                20,
+                vec![child(CTG_TMAP, 33, 1), child(CTG_TMAP, 34, 0)],
+            ),
+            chunk(CTG_MTRL, 21, vec![child(CTG_TMAP, 99, 0)]),
+        ]);
+
+        assert_eq!(resolve_texture_key_for_bmdl(&cfl, CTG_TMPL, 7), Some(34));
+        assert_eq!(resolve_texture_key_for_bmdl(&cfl, CTG_TMPL, 99), None);
+    }
 }

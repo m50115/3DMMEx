@@ -37,25 +37,33 @@ impl SceneHeader {
 
         let read_i16 = |off: usize| -> i16 {
             let raw = i16::from_le_bytes(b[off..off + 2].try_into().unwrap());
-            if swap { raw.swap_bytes() } else { raw }
+            if swap {
+                raw.swap_bytes()
+            } else {
+                raw
+            }
         };
         let read_i32 = |off: usize| -> i32 {
             let raw = i32::from_le_bytes(b[off..off + 4].try_into().unwrap());
-            if swap { raw.swap_bytes() } else { raw }
+            if swap {
+                raw.swap_bytes()
+            } else {
+                raw
+            }
         };
 
-        let bo  = read_i16(0);
+        let bo = read_i16(0);
         let osk = read_i16(2);
         if bo != BO_LE {
             return Err(EngineError::InvalidByteOrder(bo as u16));
         }
 
         Ok(Self {
-            bo:  bo_raw,
+            bo: bo_raw,
             osk: osk as i16,
             nfrm_cur: read_i32(4),
             nfrm_mac: read_i32(8),
-            unused:   read_i32(12),
+            unused: read_i32(12),
         })
     }
 

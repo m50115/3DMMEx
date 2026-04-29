@@ -17,7 +17,7 @@ use crate::scene::Scene;
 const BO_LE: i16 = 0x0001;
 
 /// MFP version constants.
-pub const MFP_VER_CUR: i16  = 2;
+pub const MFP_VER_CUR: i16 = 2;
 pub const MFP_VER_BACK: i16 = 2;
 
 // ── MFP header — 8 bytes ─────────────────────────────────────────────────────
@@ -40,22 +40,34 @@ impl MovieFilePrefix {
 
         let read_i16 = |off: usize| -> i16 {
             let raw = i16::from_le_bytes(b[off..off + 2].try_into().unwrap());
-            if swap { raw.swap_bytes() } else { raw }
+            if swap {
+                raw.swap_bytes()
+            } else {
+                raw
+            }
         };
 
-        let bo       = read_i16(0);
-        let osk      = read_i16(2);
-        let ver_cur  = read_i16(4);
+        let bo = read_i16(0);
+        let osk = read_i16(2);
+        let ver_cur = read_i16(4);
         let ver_back = read_i16(6);
 
         if bo != BO_LE {
             return Err(EngineError::InvalidByteOrder(bo as u16));
         }
         if ver_back > MFP_VER_CUR {
-            return Err(EngineError::UnsupportedVersion { cur: ver_cur, back: ver_back });
+            return Err(EngineError::UnsupportedVersion {
+                cur: ver_cur,
+                back: ver_back,
+            });
         }
 
-        Ok(Self { bo: bo_raw, osk, ver_cur, ver_back })
+        Ok(Self {
+            bo: bo_raw,
+            osk,
+            ver_cur,
+            ver_back,
+        })
     }
 
     pub fn to_le_bytes(&self) -> [u8; 8] {
@@ -70,9 +82,9 @@ impl MovieFilePrefix {
     /// Create a new LE/Windows MFP header with current version.
     pub fn new_le() -> Self {
         Self {
-            bo:       BO_LE,
-            osk:      0x7769, // Windows
-            ver_cur:  MFP_VER_CUR,
+            bo: BO_LE,
+            osk: 0x7769, // Windows
+            ver_cur: MFP_VER_CUR,
             ver_back: MFP_VER_BACK,
         }
     }
@@ -133,7 +145,10 @@ mod tests {
     fn test_mfp_unsupported_version() {
         let bytes = make_mfp(BO_LE, 5, 5); // ver_back > MFP_VER_CUR
         let result = MovieFilePrefix::from_bytes(&bytes);
-        assert!(matches!(result, Err(EngineError::UnsupportedVersion { .. })));
+        assert!(matches!(
+            result,
+            Err(EngineError::UnsupportedVersion { .. })
+        ));
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //!   Before: GPU(3ms) + PNG-encode(37ms) + base64 + IPC JSON = ~40ms/frame (~25fps)
 //!   After:  GPU(3ms) + BMP-encode(<1ms) + binary URI response = ~4ms/frame (~250fps theoretical)
 
-use tauri::{http, Manager, UriSchemeContext, Runtime};
+use tauri::{http, Manager, Runtime, UriSchemeContext};
 
 use crate::commands::{encode_rgba_to_bmp, render_to_rgba};
 use crate::state::AppState;
@@ -56,7 +56,10 @@ pub fn handle<R: Runtime>(
         }
     };
     let bmp = encode_rgba_to_bmp(&rgba, width, height);
-    eprintln!("[PERF-6b] scene={scene_idx} frame={frame} {width}x{height} total={}ms", t0.elapsed().as_millis());
+    eprintln!(
+        "[PERF-6b] scene={scene_idx} frame={frame} {width}x{height} total={}ms",
+        t0.elapsed().as_millis()
+    );
 
     http::Response::builder()
         .header("Content-Type", "image/bmp")

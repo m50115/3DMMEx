@@ -24,16 +24,16 @@ const KBO_CUR: i16 = 0x0001;
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tdts {
-    Normal       = 0,
+    Normal = 0,
     ArchPositive = 1,
-    CircleY      = 2,
-    LargeMiddle  = 3,
+    CircleY = 2,
+    LargeMiddle = 3,
     ArchNegative = 4,
-    ArchZ        = 5,
-    CircleZ      = 6,
-    Vertical     = 7,
-    GrowRight    = 8,
-    GrowLeft     = 9,
+    ArchZ = 5,
+    CircleZ = 6,
+    Vertical = 7,
+    GrowRight = 8,
+    GrowLeft = 9,
 }
 
 impl Tdts {
@@ -126,16 +126,16 @@ mod tests {
     #[test]
     fn parse_all_known_tdts() {
         let cases = [
-            (0,  Tdts::Normal),
-            (1,  Tdts::ArchPositive),
-            (2,  Tdts::CircleY),
-            (3,  Tdts::LargeMiddle),
-            (4,  Tdts::ArchNegative),
-            (5,  Tdts::ArchZ),
-            (6,  Tdts::CircleZ),
-            (7,  Tdts::Vertical),
-            (8,  Tdts::GrowRight),
-            (9,  Tdts::GrowLeft),
+            (0, Tdts::Normal),
+            (1, Tdts::ArchPositive),
+            (2, Tdts::CircleY),
+            (3, Tdts::LargeMiddle),
+            (4, Tdts::ArchNegative),
+            (5, Tdts::ArchZ),
+            (6, Tdts::CircleZ),
+            (7, Tdts::Vertical),
+            (8, Tdts::GrowRight),
+            (9, Tdts::GrowLeft),
         ];
         for (raw, expected) in cases {
             let bytes = make_tdtf(raw, 0, CTG_TDF, 1);
@@ -154,7 +154,8 @@ mod tests {
     #[test]
     fn reject_wrong_byte_order() {
         let mut bytes = make_tdtf(0, 0, CTG_TDF, 1);
-        bytes[0] = 0x02; bytes[1] = 0x00; // bo = 2
+        bytes[0] = 0x02;
+        bytes[1] = 0x00; // bo = 2
         assert!(BrTdt::from_bytes(&bytes).is_err());
     }
 

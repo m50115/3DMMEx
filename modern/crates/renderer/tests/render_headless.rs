@@ -14,8 +14,10 @@ use renderer::convert::model_to_mesh;
 use renderer::material::{GpuMaterial, GpuTexture};
 use renderer::pipeline::{GpuModelUniform, RenderPipeline};
 
-const TMPLS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/tmpls.3cn");
+const TMPLS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/tmpls.3cn"
+);
 
 // ---------------------------------------------------------------------------
 // Headless GPU setup
@@ -49,7 +51,11 @@ fn try_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
 // ---------------------------------------------------------------------------
 
 fn white_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> GpuTexture {
-    let size = wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 };
+    let size = wgpu::Extent3d {
+        width: 1,
+        height: 1,
+        depth_or_array_layers: 1,
+    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("white"),
         size,
@@ -81,7 +87,11 @@ fn white_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> GpuTexture {
         min_filter: wgpu::FilterMode::Nearest,
         ..Default::default()
     });
-    GpuTexture { texture, view, sampler }
+    GpuTexture {
+        texture,
+        view,
+        sampler,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -96,8 +106,7 @@ fn render_model_headless() {
     };
 
     // --- load first renderable model from tmpls.3cn ---
-    let file = File::open(TMPLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
+    let file = File::open(TMPLS_PATH).unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
     let cfl = ChunkyFile::read(&mut reader).expect("parse tmpls.3cn");
 
@@ -107,9 +116,15 @@ fn render_model_headless() {
         .filter(|c| c.id.ctg == CTG_BMDL)
         .find_map(|c| {
             let data = cfl.get_chunk_data(c.id.ctg, c.id.cno).ok()?;
-            if data.len() < 80 { return None; }
+            if data.len() < 80 {
+                return None;
+            }
             let m = Model::from_bytes(&data).ok()?;
-            if m.has_valid_faces() { Some(m) } else { None }
+            if m.has_valid_faces() {
+                Some(m)
+            } else {
+                None
+            }
         })
         .expect("no renderable model in tmpls.3cn");
 
@@ -119,9 +134,12 @@ fn render_model_headless() {
     let (mut min_x, mut min_y, mut min_z) = (f32::MAX, f32::MAX, f32::MAX);
     let (mut max_x, mut max_y, mut max_z) = (f32::MIN, f32::MIN, f32::MIN);
     for v in &mesh.vertices {
-        min_x = min_x.min(v.position[0]); max_x = max_x.max(v.position[0]);
-        min_y = min_y.min(v.position[1]); max_y = max_y.max(v.position[1]);
-        min_z = min_z.min(v.position[2]); max_z = max_z.max(v.position[2]);
+        min_x = min_x.min(v.position[0]);
+        max_x = max_x.max(v.position[0]);
+        min_y = min_y.min(v.position[1]);
+        max_y = max_y.max(v.position[1]);
+        min_z = min_z.min(v.position[2]);
+        max_z = max_z.max(v.position[2]);
     }
     println!(
         "mesh bbox: x=[{:.4},{:.4}] y=[{:.4},{:.4}] z=[{:.4},{:.4}], radius={}",
@@ -135,7 +153,11 @@ fn render_model_headless() {
     // --- color target ---
     let color_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("color_target"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -148,7 +170,11 @@ fn render_model_headless() {
     // --- depth target ---
     let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth_target"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -170,9 +196,8 @@ fn render_model_headless() {
     let cy = (min_y + max_y) * 0.5;
     let cz = (min_z + max_z) * 0.5;
     // Compute bounding sphere from bbox diagonal (header radius may be 0 for runtime models)
-    let half_diag = (
-        (max_x - min_x).powi(2) + (max_y - min_y).powi(2) + (max_z - min_z).powi(2)
-    ).sqrt() * 0.5;
+    let half_diag =
+        ((max_x - min_x).powi(2) + (max_y - min_y).powi(2) + (max_z - min_z).powi(2)).sqrt() * 0.5;
     let fit_radius = half_diag.max(0.001);
     camera.target = glam::Vec3::new(cx, cy, cz);
     // Pull back enough to fit the whole sphere; look from +Z side
@@ -234,7 +259,12 @@ fn render_model_headless() {
                 view: &color_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -281,7 +311,11 @@ fn render_model_headless() {
                 rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
 
     queue.submit(std::iter::once(encoder.finish()));
@@ -303,7 +337,9 @@ fn render_model_headless() {
 
     println!(
         "render_model_headless: {}×{} frame, {} non-black pixels (mesh: {} verts, {} tris)",
-        width, height, non_black,
+        width,
+        height,
+        non_black,
         mesh.vertices.len(),
         mesh.indices.len() / 3,
     );

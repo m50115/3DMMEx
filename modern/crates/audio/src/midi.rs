@@ -70,8 +70,7 @@ pub fn parse_midi(data: &[u8]) -> Result<MidiInfo, AudioError> {
         &smf_bytes
     };
 
-    let smf = midly::Smf::parse(to_parse)
-        .map_err(|e| AudioError::MidiParse(e.to_string()))?;
+    let smf = midly::Smf::parse(to_parse).map_err(|e| AudioError::MidiParse(e.to_string()))?;
 
     let format = match smf.header.format {
         midly::Format::SingleTrack => 0,

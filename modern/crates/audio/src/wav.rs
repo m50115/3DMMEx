@@ -37,8 +37,7 @@ fn read_u32_le(b: &[u8], off: usize) -> u32 {
 
 // Adaptation table: delta multipliers × 256 for each 4-bit nibble (0-15).
 const ADAPT: [i32; 16] = [
-    230, 230, 230, 230, 307, 409, 512, 614,
-    768, 614, 512, 409, 307, 230, 230, 230,
+    230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230,
 ];
 
 // Standard MS-ADPCM coefficient pairs (×256).
@@ -48,13 +47,7 @@ const COEFF2: [i32; 7] = [0, -256, 0, 64, 0, -208, -232];
 /// Decode one MS-ADPCM nibble (0-15) in-place.
 /// Returns the new PCM sample as i16.
 #[inline]
-fn decode_nibble(
-    nibble: i32,
-    pred_idx: usize,
-    delta: &mut i32,
-    s1: &mut i32,
-    s2: &mut i32,
-) -> i16 {
+fn decode_nibble(nibble: i32, pred_idx: usize, delta: &mut i32, s1: &mut i32, s2: &mut i32) -> i16 {
     // Sign-extend nibble from 4-bit two's complement
     let n = if nibble >= 8 { nibble - 16 } else { nibble };
 
@@ -104,8 +97,12 @@ fn decode_ms_adpcm_block(block: &[u8], channels: usize) -> Vec<i16> {
 
     // The two header samples output in order: s2[ch0..], s1[ch0..]
     let mut out = Vec::new();
-    for ch in 0..channels { out.push(s2[ch] as i16); }
-    for ch in 0..channels { out.push(s1[ch] as i16); }
+    for ch in 0..channels {
+        out.push(s2[ch] as i16);
+    }
+    for ch in 0..channels {
+        out.push(s1[ch] as i16);
+    }
 
     // Decode nibble pairs; nibble pairs alternate channels
     let mut ch = 0usize;
@@ -115,12 +112,24 @@ fn decode_ms_adpcm_block(block: &[u8], channels: usize) -> Vec<i16> {
 
         // High nibble
         let hi = (byte >> 4) & 0xF;
-        out.push(decode_nibble(hi, pred_idx[ch], &mut delta[ch], &mut s1[ch], &mut s2[ch]));
+        out.push(decode_nibble(
+            hi,
+            pred_idx[ch],
+            &mut delta[ch],
+            &mut s1[ch],
+            &mut s2[ch],
+        ));
         ch = (ch + 1) % channels;
 
         // Low nibble
         let lo = byte & 0xF;
-        out.push(decode_nibble(lo, pred_idx[ch], &mut delta[ch], &mut s1[ch], &mut s2[ch]));
+        out.push(decode_nibble(
+            lo,
+            pred_idx[ch],
+            &mut delta[ch],
+            &mut s1[ch],
+            &mut s2[ch],
+        ));
         ch = (ch + 1) % channels;
     }
 
@@ -140,14 +149,18 @@ fn decode_pcm(data_chunk: &[u8], bits_per_sample: u16) -> Result<Vec<i16>, Audio
         }
         16 => {
             if data_chunk.len() % 2 != 0 {
-                return Err(AudioError::WavDecode("odd data chunk length for 16-bit PCM".into()));
+                return Err(AudioError::WavDecode(
+                    "odd data chunk length for 16-bit PCM".into(),
+                ));
             }
             Ok(data_chunk
                 .chunks_exact(2)
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect())
         }
-        bps => Err(AudioError::WavDecode(format!("unsupported PCM bits_per_sample={bps}"))),
+        bps => Err(AudioError::WavDecode(format!(
+            "unsupported PCM bits_per_sample={bps}"
+        ))),
     }
 }
 
@@ -207,11 +220,13 @@ pub fn decode_wav(data: &[u8]) -> Result<(WavInfo, Vec<i16>), AudioError> {
         off = body_end + (chunk_size % 2);
     }
 
-    let data_bytes = data_chunk
-        .ok_or_else(|| AudioError::WavDecode("no data chunk found".into()))?;
+    let data_bytes =
+        data_chunk.ok_or_else(|| AudioError::WavDecode("no data chunk found".into()))?;
 
     if channels == 0 {
-        return Err(AudioError::WavDecode("fmt chunk missing or channels=0".into()));
+        return Err(AudioError::WavDecode(
+            "fmt chunk missing or channels=0".into(),
+        ));
     }
 
     let samples = match format {
@@ -241,7 +256,15 @@ pub fn decode_wav(data: &[u8]) -> Result<(WavInfo, Vec<i16>), AudioError> {
     };
 
     let sample_count = samples.len();
-    Ok((WavInfo { channels, sample_rate, format, sample_count }, samples))
+    Ok((
+        WavInfo {
+            channels,
+            sample_rate,
+            format,
+            sample_count,
+        },
+        samples,
+    ))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

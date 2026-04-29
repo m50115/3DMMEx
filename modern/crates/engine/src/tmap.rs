@@ -52,24 +52,24 @@ pub enum BrPixelType {
 impl BrPixelType {
     pub fn from_byte(b: u8) -> Self {
         match b {
-            BR_PMT_INDEX_8   => Self::Index8,
-            BR_PMT_RGB_555   => Self::Rgb555,
-            BR_PMT_RGB_565   => Self::Rgb565,
-            BR_PMT_RGB_888   => Self::Rgb888,
-            BR_PMT_RGBX_888  => Self::RgbX888,
+            BR_PMT_INDEX_8 => Self::Index8,
+            BR_PMT_RGB_555 => Self::Rgb555,
+            BR_PMT_RGB_565 => Self::Rgb565,
+            BR_PMT_RGB_888 => Self::Rgb888,
+            BR_PMT_RGBX_888 => Self::RgbX888,
             BR_PMT_RGBA_8888 => Self::Rgba8888,
-            other            => Self::Unknown(other),
+            other => Self::Unknown(other),
         }
     }
 
     /// Raw bytes per pixel for this format.
     pub fn bytes_per_pixel(self) -> usize {
         match self {
-            Self::Index8               => 1,
+            Self::Index8 => 1,
             Self::Rgb555 | Self::Rgb565 => 2,
-            Self::Rgb888               => 3,
+            Self::Rgb888 => 3,
             Self::RgbX888 | Self::Rgba8888 => 4,
-            Self::Unknown(_)           => 1,
+            Self::Unknown(_) => 1,
         }
     }
 }
@@ -117,7 +117,7 @@ impl BrTmap {
             return Err(EngineError::UnexpectedEof {
                 what: "TMAPF header",
                 need: Self::HEADER_SIZE,
-                got:  data.len(),
+                got: data.len(),
             });
         }
 
@@ -126,37 +126,48 @@ impl BrTmap {
             return Err(EngineError::InvalidByteOrder(bo as u16));
         }
         // [2..4] = osk — ignored
-        let row_bytes  = i16::from_le_bytes(data[4..6].try_into().unwrap());
+        let row_bytes = i16::from_le_bytes(data[4..6].try_into().unwrap());
         let pixel_type = data[6];
-        let flags      = data[7];
-        let base_x     = i16::from_le_bytes(data[8..10].try_into().unwrap());
-        let base_y     = i16::from_le_bytes(data[10..12].try_into().unwrap());
-        let width      = i16::from_le_bytes(data[12..14].try_into().unwrap());
-        let height     = i16::from_le_bytes(data[14..16].try_into().unwrap());
-        let origin_x   = i16::from_le_bytes(data[16..18].try_into().unwrap());
-        let origin_y   = i16::from_le_bytes(data[18..20].try_into().unwrap());
+        let flags = data[7];
+        let base_x = i16::from_le_bytes(data[8..10].try_into().unwrap());
+        let base_y = i16::from_le_bytes(data[10..12].try_into().unwrap());
+        let width = i16::from_le_bytes(data[12..14].try_into().unwrap());
+        let height = i16::from_le_bytes(data[14..16].try_into().unwrap());
+        let origin_x = i16::from_le_bytes(data[16..18].try_into().unwrap());
+        let origin_y = i16::from_le_bytes(data[18..20].try_into().unwrap());
 
         let pixel_len = (row_bytes.max(0) as usize) * (height.max(0) as usize);
-        let required  = Self::HEADER_SIZE + pixel_len;
+        let required = Self::HEADER_SIZE + pixel_len;
 
         if data.len() < required {
             return Err(EngineError::UnexpectedEof {
                 what: "TMAPF pixel data",
                 need: required,
-                got:  data.len(),
+                got: data.len(),
             });
         }
 
         let pixels = data[Self::HEADER_SIZE..Self::HEADER_SIZE + pixel_len].to_vec();
 
-        Ok(Self { row_bytes, pixel_type, flags, base_x, base_y, width, height, origin_x, origin_y, pixels })
+        Ok(Self {
+            row_bytes,
+            pixel_type,
+            flags,
+            base_x,
+            base_y,
+            width,
+            height,
+            origin_x,
+            origin_y,
+            pixels,
+        })
     }
 
     /// Serialize back to on-disk TMAPF bytes (round-trip).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(Self::HEADER_SIZE + self.pixels.len());
-        b.extend_from_slice(&1i16.to_le_bytes());            // bo  = 0x0001 (LE)
-        b.extend_from_slice(&0i16.to_le_bytes());            // osk = 0
+        b.extend_from_slice(&1i16.to_le_bytes()); // bo  = 0x0001 (LE)
+        b.extend_from_slice(&0i16.to_le_bytes()); // osk = 0
         b.extend_from_slice(&self.row_bytes.to_le_bytes());
         b.push(self.pixel_type);
         b.push(self.flags);
@@ -195,15 +206,19 @@ mod tests {
     fn make_1x1_index8() -> Vec<u8> {
         let mut b = vec![0u8; BrTmap::HEADER_SIZE + 1];
         // bo = 0x0001 (LE)
-        b[0] = 0x01; b[1] = 0x00;
+        b[0] = 0x01;
+        b[1] = 0x00;
         // cbRow = 1, type = 3 (INDEX_8), flags = 0
-        b[4] = 0x01; b[5] = 0x00; // cbRow = 1
-        b[6] = BR_PMT_INDEX_8;     // type = 3
-        b[7] = 0x00;               // flags
-        // dxp = 1, dyp = 1
-        b[12] = 0x01; b[13] = 0x00; // width = 1
-        b[14] = 0x01; b[15] = 0x00; // height = 1
-        // pixel at offset 20 = 0xAB
+        b[4] = 0x01;
+        b[5] = 0x00; // cbRow = 1
+        b[6] = BR_PMT_INDEX_8; // type = 3
+        b[7] = 0x00; // flags
+                     // dxp = 1, dyp = 1
+        b[12] = 0x01;
+        b[13] = 0x00; // width = 1
+        b[14] = 0x01;
+        b[15] = 0x00; // height = 1
+                      // pixel at offset 20 = 0xAB
         b[20] = 0xAB;
         b
     }
@@ -239,7 +254,8 @@ mod tests {
     #[test]
     fn wrong_byte_order_rejected() {
         let mut data = make_1x1_index8();
-        data[0] = 0x00; data[1] = 0x01; // bo = 0x0100 (BE, wrong)
+        data[0] = 0x00;
+        data[1] = 0x01; // bo = 0x0100 (BE, wrong)
         let result = BrTmap::from_bytes(&data);
         assert!(matches!(result, Err(EngineError::InvalidByteOrder(_))));
     }
@@ -290,7 +306,7 @@ mod tests {
         data[6] = 0x00; // INDEX_8
         data[12] = 0x04; // width = 4
         data[14] = 0x04; // height = 4
-        // Fill pixel data with pattern
+                         // Fill pixel data with pattern
         for i in 0..pixel_data_len {
             data[BrTmap::HEADER_SIZE + i] = i as u8;
         }

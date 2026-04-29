@@ -289,20 +289,16 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(new_size) => {
                 state.resize(new_size);
             }
-            WindowEvent::RedrawRequested => {
-                match state.render() {
-                    Ok(()) => {}
-                    Err(wgpu::SurfaceError::Lost) => {
-                        let size = PhysicalSize::new(
-                            state.surface_config.width,
-                            state.surface_config.height,
-                        );
-                        state.resize(size);
-                    }
-                    Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                    Err(e) => log::warn!("render error: {e:?}"),
+            WindowEvent::RedrawRequested => match state.render() {
+                Ok(()) => {}
+                Err(wgpu::SurfaceError::Lost) => {
+                    let size =
+                        PhysicalSize::new(state.surface_config.width, state.surface_config.height);
+                    state.resize(size);
                 }
-            }
+                Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
+                Err(e) => log::warn!("render error: {e:?}"),
+            },
             _ => {}
         }
     }
@@ -314,7 +310,11 @@ impl ApplicationHandler for App {
 
 /// Create a 1×1 opaque white texture used as a fallback for untextured materials.
 fn create_white_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> GpuTexture {
-    let size = wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 };
+    let size = wgpu::Extent3d {
+        width: 1,
+        height: 1,
+        depth_or_array_layers: 1,
+    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("fallback_white"),
         size,
@@ -351,7 +351,11 @@ fn create_white_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> GpuTextur
         mipmap_filter: wgpu::FilterMode::Nearest,
         ..Default::default()
     });
-    GpuTexture { texture, view, sampler }
+    GpuTexture {
+        texture,
+        view,
+        sampler,
+    }
 }
 
 // ---------------------------------------------------------------------------

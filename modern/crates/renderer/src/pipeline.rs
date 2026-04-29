@@ -54,9 +54,7 @@ impl RenderPipeline {
         // Shader module
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("3dmm_shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/shader.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shader.wgsl").into()),
         });
 
         // Bind group 0 layout: camera + light
@@ -131,12 +129,11 @@ impl RenderPipeline {
                 ],
             });
 
-        let pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("render_pipeline_layout"),
-                bind_group_layouts: &[&frame_bind_group_layout, &instance_bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("render_pipeline_layout"),
+            bind_group_layouts: &[&frame_bind_group_layout, &instance_bind_group_layout],
+            push_constant_ranges: &[],
+        });
 
         let depth_format = wgpu::TextureFormat::Depth32Float;
 
@@ -268,7 +265,11 @@ impl RenderPipeline {
     ) -> wgpu::TextureView {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth_texture"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,

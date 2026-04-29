@@ -10,13 +10,14 @@ use engine::tag::CTG_MIDS;
 
 use audio::parse_midi;
 
-const SNDS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/snds.3cn");
+const SNDS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/snds.3cn"
+);
 
 #[test]
 fn first_mids_chunk_parses() {
-    let file = File::open(SNDS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {SNDS_PATH}: {e}"));
+    let file = File::open(SNDS_PATH).unwrap_or_else(|e| panic!("Cannot open {SNDS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
     let cfl = ChunkyFile::read(&mut reader).expect("parse snds.3cn");
 
@@ -50,8 +51,7 @@ fn first_mids_chunk_parses() {
 
 #[test]
 fn batch_mids_chunks_parse() {
-    let file = File::open(SNDS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {SNDS_PATH}: {e}"));
+    let file = File::open(SNDS_PATH).unwrap_or_else(|e| panic!("Cannot open {SNDS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
     let cfl = ChunkyFile::read(&mut reader).expect("parse snds.3cn");
 
@@ -70,7 +70,10 @@ fn batch_mids_chunks_parse() {
     for chunk in &mids_chunks {
         let data = match cfl.get_chunk_data(chunk.id.ctg, chunk.id.cno) {
             Ok(d) => d,
-            Err(_) => { errors += 1; continue; }
+            Err(_) => {
+                errors += 1;
+                continue;
+            }
         };
         match parse_midi(&data) {
             Ok(info) => {

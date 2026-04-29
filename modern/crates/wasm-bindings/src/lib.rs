@@ -5,19 +5,39 @@
 
 use std::io::Cursor;
 
-use glam::Mat4;
-use js_sys::Uint8Array;
-use serde::{Deserialize, Serialize};
-use wasm_bindgen::prelude::*;
 use chunky_format::cfl::ChunkyFile;
 use chunky_format::collections::GenericGroup;
+use chunky_format::ChildRef;
 use engine::actor::ActorOnFile;
 use engine::events::{ActorEvent, EventPayload};
 use engine::model::Model;
-use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_PATH, CTG_SCEN, CTG_TMPL};
+use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MTRL, CTG_PATH, CTG_SCEN, CTG_TMAP, CTG_TMPL};
+use engine::tmap::BrTmap;
 use engine::transform::RoutePoint;
-use renderer::convert::orient_to_rotation_mat4;
+use glam::Mat4;
+use js_sys::Uint8Array;
+use renderer::convert::{orient_to_rotation_mat4, tmap_to_rgba};
 use renderer::headless::HeadlessRenderer;
+use serde::{Deserialize, Serialize};
+use wasm_bindgen::prelude::*;
+
+fn select_bmdl_child_for_cel<'a>(
+    bmdl_children: &'a [ChildRef],
+    cel_index: i32,
+) -> Option<&'a ChildRef> {
+    if bmdl_children.is_empty() {
+        return None;
+    }
+    if cel_index >= 0 {
+        if let Some(child) = bmdl_children.iter().find(|ch| ch.chid == cel_index as u32) {
+            return Some(child);
+        }
+    }
+    bmdl_children
+        .iter()
+        .find(|ch| ch.chid == 0)
+        .or_else(|| bmdl_children.first())
+}
 
 // ── DTOs serialized to JS ─────────────────────────────────────────────────
 
@@ -82,7 +102,12 @@ impl WasmEngine {
 
         let scenes = build_scene_list(&cfl);
 
-        Ok(WasmEngine { cfl, scenes, tmpls: None, renderer: None })
+        Ok(WasmEngine {
+            cfl,
+            scenes,
+            tmpls: None,
+            renderer: None,
+        })
     }
 
     /// Load an external content file (e.g. `tmpls.3cn`) from raw bytes.
@@ -99,6 +124,7 @@ impl WasmEngine {
         // Clear mesh cache so external models are re-uploaded on next render.
         if let Some(r) = &mut self.renderer {
             r.clear_mesh_cache();
+            r.clear_texture_cache();
         }
         Ok(())
     }
@@ -142,18 +168,31 @@ impl WasmEngine {
         }
         let r = self.renderer.as_mut().unwrap();
 
-        // Build render entries: (key, transform). Resolves sid=0 local BMDLs
+        // Build render entries: (key, transform, texture_key). Resolves sid=0 local BMDLs
         // and, when tmpls is loaded, sid>0 external templates.
         let entries = build_scene_entries(&self.cfl, self.tmpls.as_ref(), scene_idx, frame);
 
         // Ensure each model is uploaded to the GPU mesh cache.
         // Try local file first, then external content file.
-        for (key, _) in &entries {
+        for (key, _, texture_key) in &entries {
             if !r.has_mesh(*key) {
                 let model = load_model_from(&self.cfl, *key)
                     .or_else(|| self.tmpls.as_ref().and_then(|t| load_model_from(t, *key)));
                 if let Some(m) = model {
                     r.ensure_mesh(*key, &m);
+                }
+            }
+            if let Some(texture_key) = texture_key {
+                if !r.has_texture(*texture_key) {
+                    if let Some((width, height, rgba)) = load_texture_from(&self.cfl, *texture_key)
+                        .or_else(|| {
+                            self.tmpls
+                                .as_ref()
+                                .and_then(|t| load_texture_from(t, *texture_key))
+                        })
+                    {
+                        r.ensure_texture(*texture_key, width, height, &rgba);
+                    }
                 }
             }
         }
@@ -184,7 +223,8 @@ impl WasmEngine {
             .map_err(|e| JsValue::from_str(&e))?;
 
         // Read decompressed bytes (handles PACKED chunks).
-        let mut data = self.cfl
+        let mut data = self
+            .cfl
             .get_chunk_data(CTG_ACTR, actr_cno)
             .map_err(|e| JsValue::from_str(&format!("ACTR cno={actr_cno}: {e}")))?;
 
@@ -201,7 +241,10 @@ impl WasmEngine {
 
         // Clear PACKED flag + sync `cb` so the chunk is treated as uncompressed
         // on subsequent reads and on serialization.
-        if let Some(entry) = self.cfl.chunks.iter_mut()
+        if let Some(entry) = self
+            .cfl
+            .chunks
+            .iter_mut()
             .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == actr_cno)
         {
             entry.flags.remove(chunky_format::chunk::ChunkFlags::PACKED);
@@ -213,7 +256,9 @@ impl WasmEngine {
     /// Serialize the (possibly edited) movie back to .3mm bytes for download.
     #[wasm_bindgen]
     pub fn to_bytes(&self) -> Result<Uint8Array, JsValue> {
-        let bytes = self.cfl.to_bytes_passthrough()
+        let bytes = self
+            .cfl
+            .to_bytes_passthrough()
             .map_err(|e| JsValue::from_str(&format!("Serialize error: {e}")))?;
         let out = Uint8Array::new_with_length(bytes.len() as u32);
         out.copy_from(&bytes);
@@ -233,8 +278,7 @@ impl WasmEngine {
 #[wasm_bindgen]
 pub fn parse_movie_info(bytes: &[u8]) -> Result<JsValue, JsValue> {
     let mut cursor = Cursor::new(bytes);
-    let cfl = ChunkyFile::read(&mut cursor)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let cfl = ChunkyFile::read(&mut cursor).map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(JsValue::from_f64(cfl.chunks.len() as f64))
 }
 
@@ -252,8 +296,13 @@ fn build_scene_entries(
     tmpls: Option<&ChunkyFile>,
     scene_idx: usize,
     frame: i32,
-) -> Vec<((u32, u32), Mat4)> {
-    let scen = match cfl.chunks.iter().filter(|c| c.id.ctg == CTG_SCEN).nth(scene_idx) {
+) -> Vec<((u32, u32), Mat4, Option<(u32, u32)>)> {
+    let scen = match cfl
+        .chunks
+        .iter()
+        .filter(|c| c.id.ctg == CTG_SCEN)
+        .nth(scene_idx)
+    {
         Some(s) => s,
         None => return Vec::new(),
     };
@@ -293,39 +342,50 @@ fn build_scene_entries(
         let tmpl_cno = actf.tag_tmpl.cno;
 
         // Resolve TMPL: try local cfl first (sid=0), then external tmpls (sid>0).
-        let bmdl_keys: Vec<(u32, u32)> = if let Some(tmpl) =
-            cfl.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == tmpl_cno)
+        let (bmdl_children, texture_key): (Vec<ChildRef>, Option<(u32, u32)>) = if let Some(tmpl) = cfl
+            .chunks
+            .iter()
+            .find(|c| c.id.ctg == CTG_TMPL && c.id.cno == tmpl_cno)
         {
             // Local TMPL — BMDL data in cfl.
-            tmpl.children
+            let bmdls = tmpl.children
                 .iter()
                 .filter(|ch| ch.id.ctg == CTG_BMDL)
-                .map(|ch| (CTG_BMDL, ch.id.cno))
-                .collect()
+                .copied()
+                .collect();
+            (bmdls, resolve_texture_key_for_bmdl(cfl, CTG_TMPL, tmpl_cno))
         } else if let Some(tmpls_cfl) = tmpls {
             // External TMPL (sid>0) — BMDL data in tmpls.3cn.
-            if let Some(tmpl) =
-                tmpls_cfl.chunks.iter().find(|c| c.id.ctg == CTG_TMPL && c.id.cno == tmpl_cno)
+            if let Some(tmpl) = tmpls_cfl
+                .chunks
+                .iter()
+                .find(|c| c.id.ctg == CTG_TMPL && c.id.cno == tmpl_cno)
             {
-                tmpl.children
+                let bmdls = tmpl.children
                     .iter()
                     .filter(|ch| ch.id.ctg == CTG_BMDL)
-                    .map(|ch| (CTG_BMDL, ch.id.cno))
-                    .collect()
+                    .copied()
+                    .collect();
+                (
+                    bmdls,
+                    resolve_texture_key_for_bmdl(tmpls_cfl, CTG_TMPL, tmpl_cno),
+                )
             } else {
-                vec![]
+                (vec![], None)
             }
         } else {
-            vec![] // tmpls.3cn not loaded yet — skip external actor
+            (vec![], None) // tmpls.3cn not loaded yet — skip external actor
         };
-        if bmdl_keys.is_empty() {
+        if bmdl_children.is_empty() {
             continue;
         }
 
         // Compute translation from PATH (first keyframe) + dxyz_full_rte.
         let translation = {
-            let actr_top =
-                cfl.chunks.iter().find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
+            let actr_top = cfl
+                .chunks
+                .iter()
+                .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
             let path_child =
                 actr_top.and_then(|a| a.children.iter().find(|ch| ch.id.ctg == CTG_PATH));
             if let Some(pc) = path_child {
@@ -336,9 +396,7 @@ fn build_scene_entries(
                         let iv_mac =
                             i32::from_le_bytes(path_data[8..12].try_into().unwrap_or([0; 4]));
                         if iv_mac >= 1 {
-                            if let Ok(rpt_bytes) =
-                                path_data[GL_HDR..GL_HDR + RPT_SIZE].try_into()
-                            {
+                            if let Ok(rpt_bytes) = path_data[GL_HDR..GL_HDR + RPT_SIZE].try_into() {
                                 let rpt = RoutePoint::from_le_bytes(rpt_bytes);
                                 let dx = actf.dxyz_full_rte.x;
                                 let dy = actf.dxyz_full_rte.y;
@@ -346,7 +404,9 @@ fn build_scene_entries(
                                 let x = (rpt.position.x.0 + dx.0) as f64 / 65536.0;
                                 let y = (rpt.position.y.0 + dy.0) as f64 / 65536.0;
                                 let z = (rpt.position.z.0 + dz.0) as f64 / 65536.0;
-                                Mat4::from_translation(glam::Vec3::new(x as f32, y as f32, z as f32))
+                                Mat4::from_translation(glam::Vec3::new(
+                                    x as f32, y as f32, z as f32,
+                                ))
                             } else {
                                 Mat4::IDENTITY
                             }
@@ -365,16 +425,20 @@ fn build_scene_entries(
         };
 
         // Compute rotation from GGAE orient event (last event at or before `frame`).
-        let rotation = {
-            let actr_top =
-                cfl.chunks.iter().find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
+        let (rotation, cel_index) = {
+            let actr_top = cfl
+                .chunks
+                .iter()
+                .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == child.id.cno);
             let ggae_child =
                 actr_top.and_then(|a| a.children.iter().find(|ch| ch.id.ctg == CTG_GGAE));
             if let Some(gc) = ggae_child {
                 if let Ok(ggae_data) = cfl.get_chunk_data(gc.id.ctg, gc.id.cno) {
                     if let Ok(gg) = GenericGroup::read(&ggae_data) {
                         let mut last_rot: Option<Mat4> = None;
-                        let mut last_nfrm = i32::MIN;
+                        let mut last_rot_nfrm = i32::MIN;
+                        let mut last_cel = 0;
+                        let mut last_step_nfrm = i32::MIN;
                         for (fixed_bytes, var_bytes) in
                             gg.fixed_entries.iter().zip(gg.variable_entries.iter())
                         {
@@ -386,39 +450,75 @@ fn build_scene_entries(
                                 Err(_) => continue,
                             };
                             if let Ok(evt) = ActorEvent::parse(fixed_arr, var_bytes) {
-                                if let EventPayload::Orient(op) = &evt.payload {
-                                    if evt.header.nfrm <= frame && evt.header.nfrm >= last_nfrm {
-                                        last_nfrm = evt.header.nfrm;
-                                        last_rot = Some(orient_to_rotation_mat4(op));
+                                match &evt.payload {
+                                    EventPayload::Orient(op) => {
+                                        if evt.header.nfrm <= frame
+                                            && evt.header.nfrm >= last_rot_nfrm
+                                        {
+                                            last_rot_nfrm = evt.header.nfrm;
+                                            last_rot = Some(orient_to_rotation_mat4(op));
+                                        }
                                     }
+                                    EventPayload::Step(step) => {
+                                        if evt.header.nfrm <= frame
+                                            && evt.header.nfrm >= last_step_nfrm
+                                        {
+                                            last_step_nfrm = evt.header.nfrm;
+                                            last_cel = step.icel;
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
-                        last_rot.unwrap_or(Mat4::IDENTITY)
+                        (last_rot.unwrap_or(Mat4::IDENTITY), last_cel)
                     } else {
-                        Mat4::IDENTITY
+                        (Mat4::IDENTITY, 0)
                     }
                 } else {
-                    Mat4::IDENTITY
+                    (Mat4::IDENTITY, 0)
                 }
             } else {
-                Mat4::IDENTITY
+                (Mat4::IDENTITY, 0)
             }
         };
 
         let transform = translation * rotation;
-        for key in bmdl_keys {
-            entries.push((key, transform));
+        if let Some(child) = select_bmdl_child_for_cel(&bmdl_children, cel_index) {
+            entries.push(((child.id.ctg, child.id.cno), transform, texture_key));
         }
     }
 
     entries
 }
 
+fn resolve_texture_key_for_bmdl(
+    cfl: &ChunkyFile,
+    parent_ctg: u32,
+    parent_cno: u32,
+) -> Option<(u32, u32)> {
+    let mtrl_cno = cfl
+        .get_children(parent_ctg, parent_cno)
+        .into_iter()
+        .find(|ch| ch.id.ctg == CTG_MTRL)?
+        .id
+        .cno;
+    cfl.get_children(CTG_MTRL, mtrl_cno)
+        .into_iter()
+        .find(|ch| ch.chid == 0 && ch.id.ctg == CTG_TMAP)
+        .map(|ch| (CTG_TMAP, ch.id.cno))
+}
+
 /// Load a BMDL model from the given ChunkyFile.
 fn load_model_from(cfl: &ChunkyFile, key: (u32, u32)) -> Option<Model> {
     let data = cfl.get_chunk_data(key.0, key.1).ok()?;
     Model::from_bytes(&data).ok()
+}
+
+fn load_texture_from(cfl: &ChunkyFile, key: (u32, u32)) -> Option<(u32, u32, Vec<u8>)> {
+    let data = cfl.get_chunk_data(key.0, key.1).ok()?;
+    let tmap = BrTmap::from_bytes(&data).ok()?;
+    Some(tmap_to_rgba(&tmap))
 }
 
 // ── BMP encoder ────────────────────────────────────────────────────────────
@@ -469,7 +569,12 @@ fn encode_rgba_to_bmp(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 
 fn build_scene_list(cfl: &ChunkyFile) -> Vec<SceneInfo> {
     let mut scenes = Vec::new();
-    for (idx, chunk) in cfl.chunks.iter().filter(|c| c.id.ctg == CTG_SCEN).enumerate() {
+    for (idx, chunk) in cfl
+        .chunks
+        .iter()
+        .filter(|c| c.id.ctg == CTG_SCEN)
+        .enumerate()
+    {
         let frame_count: i32 = chunk
             .children
             .iter()
@@ -484,8 +589,16 @@ fn build_scene_list(cfl: &ChunkyFile) -> Vec<SceneInfo> {
             .max()
             .unwrap_or(0);
 
-        let actor_count = chunk.children.iter().filter(|c| c.id.ctg == CTG_ACTR).count();
-        scenes.push(SceneInfo { scene_idx: idx, frame_count, actor_count });
+        let actor_count = chunk
+            .children
+            .iter()
+            .filter(|c| c.id.ctg == CTG_ACTR)
+            .count();
+        scenes.push(SceneInfo {
+            scene_idx: idx,
+            frame_count,
+            actor_count,
+        });
     }
     scenes
 }
@@ -499,7 +612,12 @@ fn build_actor_list(cfl: &ChunkyFile, scene_idx: usize) -> Result<Vec<ActorInfo>
         .ok_or_else(|| format!("Scene {scene_idx} not found"))?;
 
     let mut actors = Vec::new();
-    for (idx, child) in scen.children.iter().filter(|c| c.id.ctg == CTG_ACTR).enumerate() {
+    for (idx, child) in scen
+        .children
+        .iter()
+        .filter(|c| c.id.ctg == CTG_ACTR)
+        .enumerate()
+    {
         let cno = child.id.cno;
         // Decompress if packed so the dxyz_full_rte fields reflect on-disk values.
         let raw = match cfl.get_chunk_data(CTG_ACTR, cno) {
@@ -527,15 +645,16 @@ fn build_actor_list(cfl: &ChunkyFile, scene_idx: usize) -> Result<Vec<ActorInfo>
         let mut ya_deg = 0.0f32;
         let mut za_deg = 0.0f32;
         {
-            let actr_top =
-                cfl.chunks.iter().find(|c| c.id.ctg == CTG_ACTR && c.id.cno == cno);
+            let actr_top = cfl
+                .chunks
+                .iter()
+                .find(|c| c.id.ctg == CTG_ACTR && c.id.cno == cno);
             if let Some(actr) = actr_top {
                 if let Some(ggae_ref) = actr.children.iter().find(|ch| ch.id.ctg == CTG_GGAE) {
                     if let Ok(ggae_data) = cfl.get_chunk_data(ggae_ref.id.ctg, ggae_ref.id.cno) {
                         if let Ok(gg) = GenericGroup::read(&ggae_data) {
                             let mut best_nfrm = i32::MAX;
-                            for (fe, ve) in
-                                gg.fixed_entries.iter().zip(gg.variable_entries.iter())
+                            for (fe, ve) in gg.fixed_entries.iter().zip(gg.variable_entries.iter())
                             {
                                 if fe.len() < 20 {
                                     continue;

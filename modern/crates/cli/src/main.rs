@@ -40,7 +40,10 @@ fn inspect(path: &PathBuf) {
         Ok(cfl) => {
             println!("=== Chunky File: {} ===", path.display());
             println!("Creator: 0x{:08X}", cfl.header.ctg_creator);
-            println!("Version: {}/{}", cfl.header.version_current, cfl.header.version_back);
+            println!(
+                "Version: {}/{}",
+                cfl.header.version_current, cfl.header.version_back
+            );
             println!("Chunks: {}", cfl.chunks.len());
             println!();
 
@@ -50,8 +53,7 @@ fn inspect(path: &PathBuf) {
                 let name = chunk.name.as_deref().unwrap_or("");
                 println!(
                     "  {} size={} children={} refs={}{}{} {}",
-                    chunk.id, chunk.cb, chunk.child_count, chunk.ref_count,
-                    packed, forest, name
+                    chunk.id, chunk.cb, chunk.child_count, chunk.ref_count, packed, forest, name
                 );
 
                 for child in &chunk.children {
@@ -91,13 +93,14 @@ fn validate(path: &PathBuf) {
     // ── Header sanity ────────────────────────────────────────────────────────
     if cfl.header.fp_mac != file_size {
         warnings.push(format!(
-            "fp_mac ({}) != actual file size ({})", cfl.header.fp_mac, file_size
+            "fp_mac ({}) != actual file size ({})",
+            cfl.header.fp_mac, file_size
         ));
     }
 
     // ── Index bytes match ────────────────────────────────────────────────────
     let idx_start = cfl.header.fp_index as usize;
-    let idx_end   = idx_start + cfl.header.cb_index as usize;
+    let idx_end = idx_start + cfl.header.cb_index as usize;
     if idx_end > raw_bytes.len() {
         errors.push("index region extends beyond file".into());
     } else if &raw_bytes[idx_start..idx_end] != cfl.raw_index.as_slice() {
@@ -108,7 +111,9 @@ fn validate(path: &PathBuf) {
     let mut covered: Vec<(u32, u32)> = Vec::new(); // (fp, fp+cb) ranges
 
     for chunk in &cfl.chunks {
-        if chunk.cb == 0 { continue; }
+        if chunk.cb == 0 {
+            continue;
+        }
 
         let fp = chunk.fp;
         let cb = chunk.cb;
@@ -117,7 +122,8 @@ fn validate(path: &PathBuf) {
         // Within file bounds
         if end as usize > raw_bytes.len() {
             errors.push(format!(
-                "{}: fp={} cb={} extends beyond file ({})", chunk.id, fp, cb, file_size
+                "{}: fp={} cb={} extends beyond file ({})",
+                chunk.id, fp, cb, file_size
             ));
             continue;
         }
@@ -126,7 +132,10 @@ fn validate(path: &PathBuf) {
         if let Some(stored) = cfl.chunk_data.get(&(chunk.id.ctg, chunk.id.cno)) {
             let file_slice = &raw_bytes[fp as usize..end as usize];
             if stored.as_slice() != file_slice {
-                errors.push(format!("{}: stored data does not match file bytes", chunk.id));
+                errors.push(format!(
+                    "{}: stored data does not match file bytes",
+                    chunk.id
+                ));
             }
         } else {
             errors.push(format!("{}: missing from chunk_data map", chunk.id));
@@ -136,7 +145,8 @@ fn validate(path: &PathBuf) {
         for &(other_fp, other_end) in &covered {
             if fp < other_end && end > other_fp {
                 errors.push(format!(
-                    "{}: overlaps with chunk at fp={}", chunk.id, other_fp
+                    "{}: overlaps with chunk at fp={}",
+                    chunk.id, other_fp
                 ));
             }
         }
@@ -146,7 +156,8 @@ fn validate(path: &PathBuf) {
         for child in &chunk.children {
             if cfl.find_chunk(child.id.ctg, child.id.cno).is_none() {
                 warnings.push(format!(
-                    "{}: child {} not found in index", chunk.id, child.id
+                    "{}: child {} not found in index",
+                    chunk.id, child.id
                 ));
             }
         }
@@ -156,7 +167,10 @@ fn validate(path: &PathBuf) {
     println!("=== Validate: {} ===", path.display());
     println!("  Chunks:    {}", cfl.chunks.len());
     println!("  File size: {} bytes", file_size);
-    println!("  Index:     fp={} cb={}", cfl.header.fp_index, cfl.header.cb_index);
+    println!(
+        "  Index:     fp={} cb={}",
+        cfl.header.fp_index, cfl.header.cb_index
+    );
 
     for w in &warnings {
         println!("  WARN: {}", w);

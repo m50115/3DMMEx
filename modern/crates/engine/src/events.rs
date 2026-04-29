@@ -6,29 +6,29 @@
 //!
 //! Event type codes (aet) are from actor.h `AEV_*` constants.
 
-use crate::transform::RouteLocation;
 use crate::error::{EngineError, EngineResult};
+use crate::fixedpoint::{FixedAngle, FixedScalar};
 use crate::tag::TagOnFile;
-use crate::fixedpoint::{FixedScalar, FixedAngle};
+use crate::transform::RouteLocation;
 
 // ── AEV type codes ───────────────────────────────────────────────────────────
 
 /// Actor event type constants from actor.h.
 #[allow(dead_code)]
 pub mod aet {
-    pub const HIDE: i32       = 0x0001; // show/hide toggle
-    pub const FREEZE: i32     = 0x0002; // freeze/unfreeze
-    pub const ORIENT: i32     = 0x0004; // orientation change
-    pub const ROTATE: i32     = 0x0008; // rotation
-    pub const SCALE: i32      = 0x0010; // scale change
-    pub const ACTOR: i32      = 0x0020; // sub-actor embed (TAG reference)
-    pub const COST: i32       = 0x0040; // costume change (TAG reference)
-    pub const SOUND: i32      = 0x0080; // sound trigger (TAG reference)
-    pub const SPEECH: i32     = 0x0100; // speech bubble (TAG reference)
-    pub const SIZE_POS: i32   = 0x0200; // size + position
-    pub const PULL: i32       = 0x0400; // pull-through (path attachment)
-    pub const STEP: i32       = 0x0800; // step animation
-    pub const RTEL: i32       = 0x1000; // route location reset
+    pub const HIDE: i32 = 0x0001; // show/hide toggle
+    pub const FREEZE: i32 = 0x0002; // freeze/unfreeze
+    pub const ORIENT: i32 = 0x0004; // orientation change
+    pub const ROTATE: i32 = 0x0008; // rotation
+    pub const SCALE: i32 = 0x0010; // scale change
+    pub const ACTOR: i32 = 0x0020; // sub-actor embed (TAG reference)
+    pub const COST: i32 = 0x0040; // costume change (TAG reference)
+    pub const SOUND: i32 = 0x0080; // sound trigger (TAG reference)
+    pub const SPEECH: i32 = 0x0100; // speech bubble (TAG reference)
+    pub const SIZE_POS: i32 = 0x0200; // size + position
+    pub const PULL: i32 = 0x0400; // pull-through (path attachment)
+    pub const STEP: i32 = 0x0800; // step animation
+    pub const RTEL: i32 = 0x1000; // route location reset
 }
 
 // ── Fixed AEV header — 20 bytes ──────────────────────────────────────────────
@@ -49,7 +49,7 @@ impl AevHeader {
 
     pub fn from_le_bytes(b: &[u8; 20]) -> Self {
         Self {
-            aet:  i32::from_le_bytes(b[0..4].try_into().unwrap()),
+            aet: i32::from_le_bytes(b[0..4].try_into().unwrap()),
             nfrm: i32::from_le_bytes(b[4..8].try_into().unwrap()),
             rtel: RouteLocation::from_le_bytes(b[8..20].try_into().unwrap()),
         }
@@ -149,7 +149,9 @@ impl StepPayload {
     pub const SIZE: usize = 4;
 
     pub fn from_le_bytes(b: &[u8; 4]) -> Self {
-        Self { icel: i32::from_le_bytes(*b) }
+        Self {
+            icel: i32::from_le_bytes(*b),
+        }
     }
 
     pub fn to_le_bytes(self) -> [u8; 4] {
@@ -211,11 +213,15 @@ impl ActorEvent {
 impl EventPayload {
     pub fn parse(aet: i32, var: &[u8]) -> EngineResult<Self> {
         match aet {
-            self::aet::HIDE    => Ok(EventPayload::Hide    { visible: var.first().copied().unwrap_or(1) != 0 }),
-            self::aet::FREEZE  => Ok(EventPayload::Freeze  { frozen: var.first().copied().unwrap_or(0) != 0 }),
-            self::aet::ORIENT  => parse_orient_payload(var).map(EventPayload::Orient),
-            self::aet::ROTATE  => parse_orient_payload(var).map(EventPayload::Rotate),
-            self::aet::SCALE   => {
+            self::aet::HIDE => Ok(EventPayload::Hide {
+                visible: var.first().copied().unwrap_or(1) != 0,
+            }),
+            self::aet::FREEZE => Ok(EventPayload::Freeze {
+                frozen: var.first().copied().unwrap_or(0) != 0,
+            }),
+            self::aet::ORIENT => parse_orient_payload(var).map(EventPayload::Orient),
+            self::aet::ROTATE => parse_orient_payload(var).map(EventPayload::Rotate),
+            self::aet::SCALE => {
                 if var.len() < ScalePayload::SIZE {
                     return Err(EngineError::UnexpectedEof {
                         what: "AEV_SCALE payload",
@@ -227,13 +233,13 @@ impl EventPayload {
                     var[..12].try_into().unwrap(),
                 )))
             }
-            self::aet::ACTOR   => parse_tag_payload(var, "AEV_ACTOR").map(EventPayload::Actor),
-            self::aet::COST    => parse_tag_payload(var, "AEV_COST").map(EventPayload::Cost),
-            self::aet::SOUND   => parse_tag_payload(var, "AEV_SOUND").map(EventPayload::Sound),
-            self::aet::SPEECH  => parse_tag_payload(var, "AEV_SPEECH").map(EventPayload::Speech),
+            self::aet::ACTOR => parse_tag_payload(var, "AEV_ACTOR").map(EventPayload::Actor),
+            self::aet::COST => parse_tag_payload(var, "AEV_COST").map(EventPayload::Cost),
+            self::aet::SOUND => parse_tag_payload(var, "AEV_SOUND").map(EventPayload::Sound),
+            self::aet::SPEECH => parse_tag_payload(var, "AEV_SPEECH").map(EventPayload::Speech),
             self::aet::SIZE_POS => Ok(EventPayload::SizePos),
-            self::aet::PULL    => Ok(EventPayload::Pull),
-            self::aet::STEP    => {
+            self::aet::PULL => Ok(EventPayload::Pull),
+            self::aet::STEP => {
                 if var.len() < StepPayload::SIZE {
                     return Err(EngineError::UnexpectedEof {
                         what: "AEV_STEP payload",
@@ -245,8 +251,11 @@ impl EventPayload {
                     var[..4].try_into().unwrap(),
                 )))
             }
-            self::aet::RTEL    => Ok(EventPayload::Rtel),
-            other => Ok(EventPayload::Unknown { aet: other, var_data: var.to_vec() }),
+            self::aet::RTEL => Ok(EventPayload::Rtel),
+            other => Ok(EventPayload::Unknown {
+                aet: other,
+                var_data: var.to_vec(),
+            }),
         }
     }
 
@@ -256,16 +265,39 @@ impl EventPayload {
             EventPayload::Hide { visible } => vec![*visible as u8],
             EventPayload::Freeze { frozen } => vec![*frozen as u8],
             EventPayload::Orient(p) | EventPayload::Rotate(p) => p.to_le_bytes().to_vec(),
-            EventPayload::Scale(p)   => p.to_le_bytes().to_vec(),
+            EventPayload::Scale(p) => p.to_le_bytes().to_vec(),
             EventPayload::Actor(p)
             | EventPayload::Cost(p)
             | EventPayload::Sound(p)
             | EventPayload::Speech(p) => p.to_le_bytes().to_vec(),
-            EventPayload::Step(p)    => p.to_le_bytes().to_vec(),
+            EventPayload::Step(p) => p.to_le_bytes().to_vec(),
             EventPayload::SizePos | EventPayload::Pull | EventPayload::Rtel => vec![],
             EventPayload::Unknown { var_data, .. } => var_data.clone(),
         }
     }
+}
+
+pub fn step_cel_at_frame<'a, I>(entries: I, frame: i32) -> i32
+where
+    I: IntoIterator<Item = (&'a [u8], &'a [u8])>,
+{
+    let mut last_cel = 0;
+    let mut last_nfrm = i32::MIN;
+    for (fixed, var) in entries {
+        if fixed.len() < AevHeader::SIZE {
+            continue;
+        }
+        let fixed_arr: &[u8; 20] = fixed[..AevHeader::SIZE].try_into().unwrap();
+        if let Ok(evt) = ActorEvent::parse(fixed_arr, var) {
+            if let EventPayload::Step(step) = evt.payload {
+                if evt.header.nfrm <= frame && evt.header.nfrm >= last_nfrm {
+                    last_nfrm = evt.header.nfrm;
+                    last_cel = step.icel;
+                }
+            }
+        }
+    }
+    last_cel
 }
 
 fn parse_orient_payload(var: &[u8]) -> EngineResult<OrientPayload> {
@@ -301,6 +333,13 @@ mod tests {
         // nfrm = 5
         b[4..8].copy_from_slice(&5i32.to_le_bytes());
         // rtel all zeros
+        b
+    }
+
+    fn header(aet: i32, nfrm: i32) -> [u8; 20] {
+        let mut b = [0u8; 20];
+        b[0..4].copy_from_slice(&aet.to_le_bytes());
+        b[4..8].copy_from_slice(&nfrm.to_le_bytes());
         b
     }
 
@@ -390,5 +429,31 @@ mod tests {
         assert_eq!(evt.payload, EventPayload::Rtel);
         let bytes = evt.payload.to_var_bytes();
         assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn test_step_cel_at_frame_keyframes() {
+        let fixed = [
+            header(aet::STEP, 2).to_vec(),
+            header(aet::STEP, 6).to_vec(),
+            header(aet::STEP, 9).to_vec(),
+        ];
+        let var = [
+            3i32.to_le_bytes().to_vec(),
+            7i32.to_le_bytes().to_vec(),
+            11i32.to_le_bytes().to_vec(),
+        ];
+        let entries = || {
+            fixed
+                .iter()
+                .zip(var.iter())
+                .map(|(f, v)| (f.as_slice(), v.as_slice()))
+        };
+
+        assert_eq!(step_cel_at_frame(std::iter::empty(), 5), 0);
+        assert_eq!(step_cel_at_frame(entries(), 1), 0);
+        assert_eq!(step_cel_at_frame(entries(), 5), 3);
+        assert_eq!(step_cel_at_frame(entries(), 6), 7);
+        assert_eq!(step_cel_at_frame(entries(), 8), 7);
     }
 }

@@ -48,7 +48,10 @@ impl TryFrom<i32> for SoundType {
             2 => Ok(SoundType::Sfx),
             3 => Ok(SoundType::Speech),
             4 => Ok(SoundType::Midi),
-            _ => Err(EngineError::OutOfRange { what: "sty", value: v as i64 }),
+            _ => Err(EngineError::OutOfRange {
+                what: "sty",
+                value: v as i64,
+            }),
         }
     }
 }
@@ -110,7 +113,7 @@ mod tests {
 
     fn make_msndf(sty: i32, vlm: i32, invalid: bool) -> [u8; 16] {
         let mut b = [0u8; 16];
-        b[0..2].copy_from_slice(&1i16.to_le_bytes());  // bo = 1
+        b[0..2].copy_from_slice(&1i16.to_le_bytes()); // bo = 1
         b[2..4].copy_from_slice(&0x7769i16.to_le_bytes()); // osk = Windows
         b[4..8].copy_from_slice(&sty.to_le_bytes());
         b[8..12].copy_from_slice(&vlm.to_le_bytes());

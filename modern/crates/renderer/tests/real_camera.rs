@@ -9,12 +9,13 @@ use engine::error::EngineError;
 use engine::tag::{CTG_CAM, CTG_GLLT};
 use renderer::convert::{camera_to_renderer, light_to_renderer};
 
-const BKGDS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/bkgds.3cn");
+const BKGDS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/bkgds.3cn"
+);
 
 fn open_bkgds() -> ChunkyFile {
-    let f = File::open(BKGDS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {BKGDS_PATH}: {e}"));
+    let f = File::open(BKGDS_PATH).unwrap_or_else(|e| panic!("Cannot open {BKGDS_PATH}: {e}"));
     ChunkyFile::read(&mut BufReader::new(f)).unwrap()
 }
 
@@ -45,7 +46,12 @@ fn convert_all_cams_to_renderer() {
             r_cam.fov_y
         );
         // Near < Far
-        assert!(r_cam.near < r_cam.far, "near={} ≥ far={}", r_cam.near, r_cam.far);
+        assert!(
+            r_cam.near < r_cam.far,
+            "near={} ≥ far={}",
+            r_cam.near,
+            r_cam.far
+        );
         // Near must be positive
         assert!(r_cam.near > 0.0, "near={} ≤ 0", r_cam.near);
         // Aspect set correctly
@@ -77,7 +83,11 @@ fn convert_all_gllts_to_renderer() {
             let gpu_light = light_to_renderer(lit);
 
             // Intensity non-negative
-            assert!(gpu_light.intensity >= 0.0, "intensity={}", gpu_light.intensity);
+            assert!(
+                gpu_light.intensity >= 0.0,
+                "intensity={}",
+                gpu_light.intensity
+            );
             // Color channels in [0, 1]
             for &c in &gpu_light.color {
                 assert!((0.0..=1.0).contains(&c), "color channel={c}");

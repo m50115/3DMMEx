@@ -15,6 +15,6 @@ pub mod player;
 pub mod wav;
 
 pub use error::AudioError;
-pub use midi::{MidiInfo, parse_midi};
+pub use midi::{parse_midi, MidiInfo};
 pub use player::AudioPlayer;
-pub use wav::{WavInfo, decode_wav};
+pub use wav::{decode_wav, WavInfo};

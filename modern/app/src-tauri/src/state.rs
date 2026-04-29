@@ -76,8 +76,12 @@ impl AppState {
             if let Some(p) = player {
                 while let Ok(cmd) = rx.recv() {
                     match cmd {
-                        AudioCmd::PlayWav(wav_bytes) => { let _ = p.play_wav(wav_bytes); }
-                        AudioCmd::Stop => { p.stop(); }
+                        AudioCmd::PlayWav(wav_bytes) => {
+                            let _ = p.play_wav(wav_bytes);
+                        }
+                        AudioCmd::Stop => {
+                            p.stop();
+                        }
                     }
                 }
             }

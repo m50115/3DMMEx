@@ -61,7 +61,11 @@ pub struct Mesh {
 
 impl Mesh {
     pub fn new(vertices: Vec<GpuVertex>, indices: Vec<u32>, radius: f32) -> Self {
-        Self { vertices, indices, radius }
+        Self {
+            vertices,
+            indices,
+            radius,
+        }
     }
 
     /// Number of indices (= number of triangles × 3).

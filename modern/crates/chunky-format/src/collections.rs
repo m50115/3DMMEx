@@ -1,7 +1,7 @@
 //! GL, GG, GST — Collection serialization matching original binary layout.
 
-use byteorder::{LittleEndian, ReadBytesExt};
 use crate::error::{ChunkyError, Result};
+use byteorder::{LittleEndian, ReadBytesExt};
 
 /// GL (General List) — fixed-size element collection.
 ///
@@ -81,9 +81,11 @@ impl CollectionHeader {
 
     pub fn read(data: &[u8]) -> Result<Self> {
         if data.len() < Self::SIZE {
-            return Err(ChunkyError::InvalidCollection(
-                format!("Header too small: {} < {}", data.len(), Self::SIZE)
-            ));
+            return Err(ChunkyError::InvalidCollection(format!(
+                "Header too small: {} < {}",
+                data.len(),
+                Self::SIZE
+            )));
         }
         let mut c = std::io::Cursor::new(data);
         Ok(Self {
@@ -105,9 +107,11 @@ impl GenericList {
         let expected = data_start + count * entry_size;
 
         if data.len() < expected {
-            return Err(ChunkyError::InvalidCollection(
-                format!("GL data too small: {} < {}", data.len(), expected)
-            ));
+            return Err(ChunkyError::InvalidCollection(format!(
+                "GL data too small: {} < {}",
+                data.len(),
+                expected
+            )));
         }
 
         let mut entries = Vec::with_capacity(count);
@@ -152,37 +156,39 @@ impl GenericGroup {
     /// Deserialize a GG from raw chunk bytes (GGF 20-byte header format).
     pub fn read(data: &[u8]) -> Result<Self> {
         if data.len() < GGF_HEADER_SIZE {
-            return Err(ChunkyError::InvalidCollection(
-                format!("GG header too small: {} < {GGF_HEADER_SIZE}", data.len())
-            ));
+            return Err(ChunkyError::InvalidCollection(format!(
+                "GG header too small: {} < {GGF_HEADER_SIZE}",
+                data.len()
+            )));
         }
-        let bo       = u16::from_le_bytes(data[0..2].try_into().unwrap());
-        let osk      = u16::from_le_bytes(data[2..4].try_into().unwrap());
-        let count    = i32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
-        let bv_mac   = i32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+        let bo = u16::from_le_bytes(data[0..2].try_into().unwrap());
+        let osk = u16::from_le_bytes(data[2..4].try_into().unwrap());
+        let count = i32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+        let bv_mac = i32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
         // data[12..16] = clocFree — ignored when reading
         let cb_fixed = i32::from_le_bytes(data[16..20].try_into().unwrap()) as usize;
 
         let data1_start = GGF_HEADER_SIZE;
-        let data1_end   = data1_start + bv_mac;
-        let loc_start   = data1_end;
-        let loc_end     = loc_start + count * 8;
+        let data1_end = data1_start + bv_mac;
+        let loc_start = data1_end;
+        let loc_end = loc_start + count * 8;
 
         if data.len() < loc_end {
-            return Err(ChunkyError::InvalidCollection(
-                format!("GG data too small: {} < {loc_end}", data.len())
-            ));
+            return Err(ChunkyError::InvalidCollection(format!(
+                "GG data too small: {} < {loc_end}",
+                data.len()
+            )));
         }
 
         let data1 = &data[data1_start..data1_end];
 
-        let mut fixed_entries    = Vec::with_capacity(count);
+        let mut fixed_entries = Vec::with_capacity(count);
         let mut variable_entries = Vec::with_capacity(count);
 
         for i in 0..count {
             let loff = loc_start + i * 8;
-            let bv   = i32::from_le_bytes(data[loff..loff+4].try_into().unwrap()) as usize;
-            let cb   = i32::from_le_bytes(data[loff+4..loff+8].try_into().unwrap()) as usize;
+            let bv = i32::from_le_bytes(data[loff..loff + 4].try_into().unwrap()) as usize;
+            let cb = i32::from_le_bytes(data[loff + 4..loff + 8].try_into().unwrap()) as usize;
 
             // Fixed: data1[bv .. bv+cb_fixed]
             let fixed = if bv + cb_fixed <= bv_mac {
@@ -214,7 +220,7 @@ impl GenericGroup {
 
     /// Serialize a GG to bytes (GGF 20-byte header format).
     pub fn write(&self) -> Vec<u8> {
-        let count    = self.fixed_entries.len();
+        let count = self.fixed_entries.len();
         let cb_fixed = self.fixed_size as usize;
 
         // Build hqData1: each entry = cbFixed fixed bytes || variable bytes.
@@ -235,10 +241,10 @@ impl GenericGroup {
         // 20-byte GGF header
         buf.extend_from_slice(&self.bo.to_le_bytes());
         buf.extend_from_slice(&self.osk.to_le_bytes());
-        buf.extend_from_slice(&(count as i32).to_le_bytes());      // ilocMac
-        buf.extend_from_slice(&(bv_mac as i32).to_le_bytes());     // bvMac
-        buf.extend_from_slice(&(-1i32).to_le_bytes());             // clocFree = cvNil
-        buf.extend_from_slice(&(cb_fixed as i32).to_le_bytes());   // cbFixed
+        buf.extend_from_slice(&(count as i32).to_le_bytes()); // ilocMac
+        buf.extend_from_slice(&(bv_mac as i32).to_le_bytes()); // bvMac
+        buf.extend_from_slice(&(-1i32).to_le_bytes()); // clocFree = cvNil
+        buf.extend_from_slice(&(cb_fixed as i32).to_le_bytes()); // cbFixed
 
         // hqData1
         buf.extend_from_slice(&data1);
@@ -265,9 +271,11 @@ impl StringTable {
         let entries_end = entries_start + count * entry_stride;
 
         if data.len() < entries_end {
-            return Err(ChunkyError::InvalidCollection(
-                format!("GST data too small: {} < {}", data.len(), entries_end)
-            ));
+            return Err(ChunkyError::InvalidCollection(format!(
+                "GST data too small: {} < {}",
+                data.len(),
+                entries_end
+            )));
         }
 
         let string_data_start = entries_end;
@@ -276,9 +284,9 @@ impl StringTable {
 
         for i in 0..count {
             let eoff = entries_start + i * entry_stride;
-            let bst = u32::from_le_bytes([
-                data[eoff], data[eoff + 1], data[eoff + 2], data[eoff + 3],
-            ]) as usize;
+            let bst =
+                u32::from_le_bytes([data[eoff], data[eoff + 1], data[eoff + 2], data[eoff + 3]])
+                    as usize;
 
             if extra_size > 0 {
                 extras.push(data[eoff + 4..eoff + 4 + extra_size].to_vec());
@@ -323,10 +331,7 @@ mod tests {
             entry_size: 8,
             bo: bom::BO_NATIVE,
             osk: bom::OSK_WIN,
-            entries: vec![
-                vec![1, 0, 0, 0, 2, 0, 0, 0],
-                vec![3, 0, 0, 0, 4, 0, 0, 0],
-            ],
+            entries: vec![vec![1, 0, 0, 0, 2, 0, 0, 0], vec![3, 0, 0, 0, 4, 0, 0, 0]],
         };
 
         let bytes = gl.write();
@@ -344,14 +349,8 @@ mod tests {
             fixed_size: 4,
             bo: bom::BO_NATIVE,
             osk: bom::OSK_WIN,
-            fixed_entries: vec![
-                vec![1, 0, 0, 0],
-                vec![2, 0, 0, 0],
-            ],
-            variable_entries: vec![
-                vec![0xAA, 0xBB],
-                vec![0xCC, 0xDD, 0xEE],
-            ],
+            fixed_entries: vec![vec![1, 0, 0, 0], vec![2, 0, 0, 0]],
+            variable_entries: vec![vec![0xAA, 0xBB], vec![0xCC, 0xDD, 0xEE]],
         };
 
         let bytes = gg.write();

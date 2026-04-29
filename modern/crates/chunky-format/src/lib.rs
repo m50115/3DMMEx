@@ -15,15 +15,15 @@
 //! Files written by this crate MUST be readable by the original 1995 3D Movie Maker.
 //! Round-trip (read → write) of unmodified files MUST produce byte-identical output.
 
-pub mod error;
 pub mod bom;
-pub mod chunk;
 pub mod cfl;
+pub mod chunk;
 pub mod codec;
 pub mod collections;
+pub mod error;
 pub mod tag;
 
-pub use error::{ChunkyError, Result};
-pub use chunk::{ChunkId, ChunkEntry, ChildRef, ChunkFlags};
 pub use cfl::ChunkyFile;
+pub use chunk::{ChildRef, ChunkEntry, ChunkFlags, ChunkId};
+pub use error::{ChunkyError, Result};
 pub use tag::ResourceTag;

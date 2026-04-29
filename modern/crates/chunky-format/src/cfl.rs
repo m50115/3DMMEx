@@ -48,11 +48,11 @@
 //! Each chunk independently compressed. Writing uncompressed is valid (3DMM reads both).
 //! fp_index, fp_map, fp_mac are byte offsets from file start.
 
-use std::io::{Read, Seek, SeekFrom, Write};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::bom::{needs_swap, swap_bytes_bom};
-use crate::chunk::{ChunkId, ChunkEntry, ChunkFlags, ChildRef};
+use crate::chunk::{ChildRef, ChunkEntry, ChunkFlags, ChunkId};
 use crate::codec;
 use crate::error::{ChunkyError, Result};
 
@@ -108,10 +108,12 @@ impl ChunkyHeader {
         let is_be = match magic {
             MAGIC_CHUNKY => false,
             MAGIC_CHUNKY_BE => true,
-            _ => return Err(ChunkyError::InvalidMagic {
-                expected: MAGIC_CHUNKY,
-                actual: magic,
-            }),
+            _ => {
+                return Err(ChunkyError::InvalidMagic {
+                    expected: MAGIC_CHUNKY,
+                    actual: magic,
+                })
+            }
         };
 
         // If big-endian, swap all fields according to BOM
@@ -256,11 +258,15 @@ impl ChunkyFile {
 
     /// Get decompressed chunk data.
     pub fn get_chunk_data(&self, ctg: u32, cno: u32) -> Result<Vec<u8>> {
-        let raw = self.chunk_data.get(&(ctg, cno))
+        let raw = self
+            .chunk_data
+            .get(&(ctg, cno))
             .ok_or(ChunkyError::ChunkNotFound { ctg, cno })?;
 
         // Find the chunk entry to check if it's compressed
-        let entry = self.chunks.iter()
+        let entry = self
+            .chunks
+            .iter()
             .find(|c| c.id.ctg == ctg && c.id.cno == cno)
             .ok_or(ChunkyError::ChunkNotFound { ctg, cno })?;
 
@@ -284,15 +290,19 @@ impl ChunkyFile {
         out.resize(HEADER_SIZE, 0u8);
 
         // ── 2. Write chunks sequentially; record new file positions ────────
-        let mut new_fp: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+        let mut new_fp: std::collections::HashMap<(u32, u32), u32> =
+            std::collections::HashMap::new();
         for entry in &self.chunks {
             if entry.cb == 0 {
                 new_fp.insert((entry.id.ctg, entry.id.cno), 0);
                 continue;
             }
-            let data = self.chunk_data
-                .get(&(entry.id.ctg, entry.id.cno))
-                .ok_or(ChunkyError::ChunkNotFound { ctg: entry.id.ctg, cno: entry.id.cno })?;
+            let data = self.chunk_data.get(&(entry.id.ctg, entry.id.cno)).ok_or(
+                ChunkyError::ChunkNotFound {
+                    ctg: entry.id.ctg,
+                    cno: entry.id.cno,
+                },
+            )?;
             let fp = out.len() as u32;
             new_fp.insert((entry.id.ctg, entry.id.cno), fp);
             out.extend_from_slice(data);
@@ -301,7 +311,13 @@ impl ChunkyFile {
         // ── 3. Build and write GGF index ────────────────────────────────────
         let fp_index = out.len() as u32;
         let use_small = self.header.uses_small_index();
-        let ggf_bytes = Self::write_ggf_index(&self.chunks, &new_fp, self.header.byte_order, self.header.os_kind, use_small)?;
+        let ggf_bytes = Self::write_ggf_index(
+            &self.chunks,
+            &new_fp,
+            self.header.byte_order,
+            self.header.os_kind,
+            use_small,
+        )?;
         let cb_index = ggf_bytes.len() as u32;
         out.extend_from_slice(&ggf_bytes);
 
@@ -310,11 +326,11 @@ impl ChunkyFile {
 
         // ── 5. Patch header ─────────────────────────────────────────────────
         let mut hdr = self.header.clone();
-        hdr.fp_mac   = fp_mac;
+        hdr.fp_mac = fp_mac;
         hdr.fp_index = fp_index;
         hdr.cb_index = cb_index;
-        hdr.fp_map   = 0;
-        hdr.cb_map   = 0;
+        hdr.fp_map = 0;
+        hdr.cb_map = 0;
         let mut hdr_buf = Vec::with_capacity(HEADER_SIZE);
         hdr.write(&mut hdr_buf)?;
         out[..HEADER_SIZE].copy_from_slice(&hdr_buf);
@@ -337,7 +353,11 @@ impl ChunkyFile {
         osk: u16,
         use_small: bool,
     ) -> Result<Vec<u8>> {
-        let cb_fixed: u32 = if use_small { ChunkEntry::SIZE_SMALL as u32 } else { ChunkEntry::SIZE_BIG as u32 };
+        let cb_fixed: u32 = if use_small {
+            ChunkEntry::SIZE_SMALL as u32
+        } else {
+            ChunkEntry::SIZE_BIG as u32
+        };
         let iloc_mac = chunks.len() as u32;
 
         // Build data buffer sequentially
@@ -348,7 +368,9 @@ impl ChunkyFile {
             let bv = data_buf.len() as u32;
 
             // Fixed portion
-            let fp_val = *new_fp.get(&(entry.id.ctg, entry.id.cno)).unwrap_or(&entry.fp);
+            let fp_val = *new_fp
+                .get(&(entry.id.ctg, entry.id.cno))
+                .unwrap_or(&entry.fp);
             if use_small {
                 let lu = (entry.cb << 8) | (entry.flags.bits() & 0xFF);
                 data_buf.extend_from_slice(&entry.id.ctg.to_le_bytes());
@@ -410,12 +432,15 @@ impl ChunkyFile {
 
     /// Find a chunk entry by type and number.
     pub fn find_chunk(&self, ctg: u32, cno: u32) -> Option<&ChunkEntry> {
-        self.chunks.iter().find(|c| c.id.ctg == ctg && c.id.cno == cno)
+        self.chunks
+            .iter()
+            .find(|c| c.id.ctg == ctg && c.id.cno == cno)
     }
 
     /// Get children of a chunk.
     pub fn get_children(&self, ctg: u32, cno: u32) -> Vec<&ChildRef> {
-        self.chunks.iter()
+        self.chunks
+            .iter()
             .find(|c| c.id.ctg == ctg && c.id.cno == cno)
             .map(|c| c.children.iter().collect())
             .unwrap_or_default()
@@ -436,28 +461,30 @@ impl ChunkyFile {
 
         // ── GGF header (20 bytes) ─────────────────────────────────────────────
         let mut cursor = std::io::Cursor::new(raw);
-        let _bo        = cursor.read_u16::<LittleEndian>()?;
-        let _osk       = cursor.read_u16::<LittleEndian>()?;
-        let iloc_mac   = cursor.read_u32::<LittleEndian>()? as usize; // element count
-        let bv_mac     = cursor.read_u32::<LittleEndian>()? as usize; // data buffer size
-        let _cloc_free = cursor.read_u32::<LittleEndian>()?;          // free-slot count (ignored)
-        let cb_fixed   = cursor.read_u32::<LittleEndian>()? as usize; // fixed bytes per element
+        let _bo = cursor.read_u16::<LittleEndian>()?;
+        let _osk = cursor.read_u16::<LittleEndian>()?;
+        let iloc_mac = cursor.read_u32::<LittleEndian>()? as usize; // element count
+        let bv_mac = cursor.read_u32::<LittleEndian>()? as usize; // data buffer size
+        let _cloc_free = cursor.read_u32::<LittleEndian>()?; // free-slot count (ignored)
+        let cb_fixed = cursor.read_u32::<LittleEndian>()? as usize; // fixed bytes per element
 
         // Data buffer: bytes [20 .. 20+bvMac)
         let buf_start = 20usize;
-        let buf_end   = buf_start + bv_mac;
+        let buf_end = buf_start + bv_mac;
         // LOC table:  bytes [buf_end .. buf_end + ilocMac*8)
         let loc_start = buf_end;
-        let loc_end   = loc_start + iloc_mac * 8;
+        let loc_end = loc_start + iloc_mac * 8;
 
         if raw.len() < loc_end {
-            return Err(ChunkyError::IndexCorruption(
-                format!("index too small: {} < {} required", raw.len(), loc_end)
-            ));
+            return Err(ChunkyError::IndexCorruption(format!(
+                "index too small: {} < {} required",
+                raw.len(),
+                loc_end
+            )));
         }
 
         let data_buf = &raw[buf_start..buf_end];
-        let loc_buf  = &raw[loc_start..loc_end];
+        let loc_buf = &raw[loc_start..loc_end];
 
         let use_small = header.uses_small_index() && cb_fixed == ChunkEntry::SIZE_SMALL;
         let mut chunks = Vec::with_capacity(iloc_mac);
@@ -465,17 +492,23 @@ impl ChunkyFile {
         for i in 0..iloc_mac {
             // ── Read LOC[i] ───────────────────────────────────────────────────
             let lo = i * 8;
-            let bv  = u32::from_le_bytes(loc_buf[lo..lo+4].try_into().unwrap()) as usize;
-            let cb  = u32::from_le_bytes(loc_buf[lo+4..lo+8].try_into().unwrap()) as usize;
+            let bv = u32::from_le_bytes(loc_buf[lo..lo + 4].try_into().unwrap()) as usize;
+            let cb = u32::from_le_bytes(loc_buf[lo + 4..lo + 8].try_into().unwrap()) as usize;
 
             // Skip free / deleted slots
-            if cb == 0 { continue; }
+            if cb == 0 {
+                continue;
+            }
 
             // Bounds check
             if bv + cb > data_buf.len() || cb < cb_fixed {
-                return Err(ChunkyError::IndexCorruption(
-                    format!("LOC[{}]: bv={} cb={} out of bounds (buf={})", i, bv, cb, data_buf.len())
-                ));
+                return Err(ChunkyError::IndexCorruption(format!(
+                    "LOC[{}]: bv={} cb={} out of bounds (buf={})",
+                    i,
+                    bv,
+                    cb,
+                    data_buf.len()
+                )));
             }
 
             // ── Parse fixed part (CRPSM or CRPBG) ────────────────────────────
@@ -487,8 +520,9 @@ impl ChunkyFile {
             };
 
             // ── Parse variable part (children + optional name) ─────────────
-            let var_bytes = &data_buf[bv + cb_fixed .. bv + cb];
-            entry.children = Self::parse_var_data(var_bytes, entry.child_count as usize, entry.name.is_some());
+            let var_bytes = &data_buf[bv + cb_fixed..bv + cb];
+            entry.children =
+                Self::parse_var_data(var_bytes, entry.child_count as usize, entry.name.is_some());
             // Try to parse name from remaining bytes after children
             let kids_cb = entry.child_count as usize * ChildRef::SIZE;
             if var_bytes.len() > kids_cb {
@@ -506,7 +540,9 @@ impl ChunkyFile {
         let mut children = Vec::with_capacity(kid_count);
         for k in 0..kid_count {
             let off = k * ChildRef::SIZE;
-            if off + ChildRef::SIZE > var.len() { break; }
+            if off + ChildRef::SIZE > var.len() {
+                break;
+            }
             let b = &var[off..off + ChildRef::SIZE];
             children.push(ChildRef {
                 id: ChunkId {
@@ -522,9 +558,13 @@ impl ChunkyFile {
     /// Parse an STN (short text name) from bytes.
     /// Format: [osk: u16][cch: u8][chars: cch bytes][null: 1 byte]
     fn parse_stn(bytes: &[u8]) -> Option<String> {
-        if bytes.len() < 4 { return None; }
+        if bytes.len() < 4 {
+            return None;
+        }
         let cch = bytes[2] as usize;
-        if bytes.len() < 3 + cch + 1 { return None; }
+        if bytes.len() < 3 + cch + 1 {
+            return None;
+        }
         let chars = &bytes[3..3 + cch];
         Some(String::from_utf8_lossy(chars).into_owned())
     }

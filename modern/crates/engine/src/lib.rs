@@ -5,18 +5,18 @@
 //! Module hierarchy (bottom-up dependency order):
 //!   fixedpoint → transform → tag → events → actor → scene → movie
 
-pub mod error;
-pub mod fixedpoint;
-pub mod tag;
-pub mod transform;
-pub mod events;
-pub mod model;
-pub mod material;
-pub mod tmap;
-pub mod background;
 pub mod actor;
-pub mod scene;
+pub mod background;
+pub mod error;
+pub mod events;
+pub mod fixedpoint;
+pub mod material;
+pub mod model;
 pub mod movie;
 pub mod msnd;
+pub mod scene;
+pub mod tag;
 pub mod tdf;
 pub mod tdt;
+pub mod tmap;
+pub mod transform;

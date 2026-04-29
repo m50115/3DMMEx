@@ -3,7 +3,7 @@
 //! Converts engine domain types (fixed-point) to renderer types (f32).
 //! This is the boundary where BRS 16.16 → f32 and br_fraction i16 → f32.
 
-use engine::background::{Bmat34, BrCamera, BrLight, bra_to_radians};
+use engine::background::{bra_to_radians, Bmat34, BrCamera, BrLight};
 use engine::events::OrientPayload;
 use engine::fixedpoint::FixedScalar;
 use engine::material::BrMaterial;
@@ -40,10 +40,7 @@ fn vertex_to_gpu(v: &BrVertex) -> GpuVertex {
             fraction_to_f32(v.normal[1]),
             fraction_to_f32(v.normal[2]),
         ],
-        uv: [
-            brs_to_f32(v.uv[0]),
-            brs_to_f32(v.uv[1]),
-        ],
+        uv: [brs_to_f32(v.uv[0]), brs_to_f32(v.uv[1])],
         color: [
             v.red as f32 / 255.0,
             v.green as f32 / 255.0,
@@ -63,17 +60,17 @@ pub fn material_to_gpu(mat: &BrMaterial) -> Material {
     Material {
         gpu: GpuMaterial {
             base_color: [
-                mat.red()   as f32 / 255.0,
+                mat.red() as f32 / 255.0,
                 mat.green() as f32 / 255.0,
-                mat.blue()  as f32 / 255.0,
+                mat.blue() as f32 / 255.0,
                 1.0, // opacity always 1.0 (3DMM Socrates always sets kbOpaque=0xFF)
             ],
-            ambient:       mat.ka as f32 / 65535.0,
-            diffuse:       mat.kd as f32 / 65535.0,
-            specular:      mat.ks as f32 / 65535.0,
+            ambient: mat.ka as f32 / 65535.0,
+            diffuse: mat.kd as f32 / 65535.0,
+            specular: mat.ks as f32 / 65535.0,
             specular_power: mat.power.0 as f32 / 65536.0,
         },
-        prelit: false,    // MTRLF has no flags field; use default
+        prelit: false, // MTRLF has no flags field; use default
         two_sided: false,
         texture_idx: None,
     }
@@ -91,7 +88,7 @@ pub fn camera_to_renderer(cam: &BrCamera, aspect: f32) -> Camera {
 
     // BRender cameras look in +Z of their local frame (row 2 = forward).
     let position = glam::Vec3::new(pos[0], pos[1], pos[2]);
-    let target   = glam::Vec3::new(pos[0] + fwd[0], pos[1] + fwd[1], pos[2] + fwd[2]);
+    let target = glam::Vec3::new(pos[0] + fwd[0], pos[1] + fwd[1], pos[2] + fwd[2]);
 
     Camera {
         position,
@@ -99,7 +96,7 @@ pub fn camera_to_renderer(cam: &BrCamera, aspect: f32) -> Camera {
         up: glam::Vec3::Y,
         fov_y: cam.fov_radians(),
         near: cam.hither_f32(),
-        far:  cam.yon_f32(),
+        far: cam.yon_f32(),
         aspect,
     }
 }
@@ -154,8 +151,8 @@ pub fn actor_translation_mat4(route_pos: &Vec3, dxyz: &Vec3) -> glam::Mat4 {
 /// 3DMM applies rotations in X→Y→Z order (pitch → yaw → roll).
 pub fn orient_to_rotation_mat4(orient: &OrientPayload) -> glam::Mat4 {
     let pitch = bra_to_radians(orient.xa.0);
-    let yaw   = bra_to_radians(orient.ya.0);
-    let roll  = bra_to_radians(orient.za.0);
+    let yaw = bra_to_radians(orient.ya.0);
+    let roll = bra_to_radians(orient.za.0);
     glam::Mat4::from_euler(glam::EulerRot::XYZ, pitch, yaw, roll)
 }
 
@@ -177,10 +174,10 @@ pub fn orient_to_rotation_mat4(orient: &OrientPayload) -> glam::Mat4 {
 /// Row stride (`row_bytes`) is respected — only `width` pixels per row
 /// are read, skipping any padding bytes.
 pub fn tmap_to_rgba(tmap: &BrTmap) -> (u32, u32, Vec<u8>) {
-    let width     = tmap.width.max(0) as usize;
-    let height    = tmap.height.max(0) as usize;
+    let width = tmap.width.max(0) as usize;
+    let height = tmap.height.max(0) as usize;
     let row_bytes = tmap.row_bytes.max(0) as usize;
-    let mut out   = Vec::with_capacity(width * height * 4);
+    let mut out = Vec::with_capacity(width * height * 4);
 
     match tmap.pixel_type_parsed() {
         BrPixelType::Index8 => {
@@ -188,7 +185,10 @@ pub fn tmap_to_rgba(tmap: &BrTmap) -> (u32, u32, Vec<u8>) {
                 let rs = row * row_bytes;
                 for col in 0..width {
                     let idx = tmap.pixels[rs + col];
-                    out.push(idx); out.push(idx); out.push(idx); out.push(255);
+                    out.push(idx);
+                    out.push(idx);
+                    out.push(idx);
+                    out.push(255);
                 }
             }
         }
@@ -198,10 +198,10 @@ pub fn tmap_to_rgba(tmap: &BrTmap) -> (u32, u32, Vec<u8>) {
                 for col in 0..width {
                     let lo = tmap.pixels[rs + col * 2];
                     let hi = tmap.pixels[rs + col * 2 + 1];
-                    let p  = u16::from_le_bytes([lo, hi]);
+                    let p = u16::from_le_bytes([lo, hi]);
                     let r = ((p >> 10) & 0x1F) as u8;
-                    let g = ((p >>  5) & 0x1F) as u8;
-                    let b = ( p        & 0x1F) as u8;
+                    let g = ((p >> 5) & 0x1F) as u8;
+                    let b = (p & 0x1F) as u8;
                     // Expand 5-bit → 8-bit: shift up and replicate high bits into low bits
                     out.push((r << 3) | (r >> 2));
                     out.push((g << 3) | (g >> 2));
@@ -216,10 +216,10 @@ pub fn tmap_to_rgba(tmap: &BrTmap) -> (u32, u32, Vec<u8>) {
                 for col in 0..width {
                     let lo = tmap.pixels[rs + col * 2];
                     let hi = tmap.pixels[rs + col * 2 + 1];
-                    let p  = u16::from_le_bytes([lo, hi]);
+                    let p = u16::from_le_bytes([lo, hi]);
                     let r = ((p >> 11) & 0x1F) as u8;
-                    let g = ((p >>  5) & 0x3F) as u8;
-                    let b = ( p        & 0x1F) as u8;
+                    let g = ((p >> 5) & 0x3F) as u8;
+                    let b = (p & 0x1F) as u8;
                     out.push((r << 3) | (r >> 2));
                     out.push((g << 2) | (g >> 4));
                     out.push((b << 3) | (b >> 2));
@@ -270,14 +270,14 @@ pub fn tmap_to_rgba(tmap: &BrTmap) -> (u32, u32, Vec<u8>) {
 ///
 /// Returns a [`GpuTexture`] containing the texture, a default view, and a
 /// bilinear clamp-to-edge sampler.
-pub fn tmap_to_texture(
-    tmap: &BrTmap,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> GpuTexture {
+pub fn tmap_to_texture(tmap: &BrTmap, device: &wgpu::Device, queue: &wgpu::Queue) -> GpuTexture {
     let (width, height, rgba) = tmap_to_rgba(tmap);
 
-    let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("tmap_texture"),
@@ -319,7 +319,11 @@ pub fn tmap_to_texture(
         ..Default::default()
     });
 
-    GpuTexture { texture, view, sampler }
+    GpuTexture {
+        texture,
+        view,
+        sampler,
+    }
 }
 
 /// Convert a parsed BRender [`Model`] into a renderable [`Mesh`].
@@ -347,7 +351,7 @@ mod tests {
     use engine::events::OrientPayload;
     use engine::fixedpoint::{FixedAngle, FixedScalar};
     use engine::material::BrMaterial;
-    use engine::model::{BrFaceFile, Bounds, ModelHeader, Model};
+    use engine::model::{Bounds, BrFaceFile, Model, ModelHeader};
     use engine::tmap::{BrTmap, BR_PMT_INDEX_8, BR_PMT_RGB_565};
     use engine::transform::Vec3;
 
@@ -464,35 +468,41 @@ mod tests {
     fn make_triangle_model() -> Model {
         let v0 = BrVertex {
             position: Vec3 {
-                x: FixedScalar(0),             // 0.0
-                y: FixedScalar(0x0001_0000),   // 1.0
+                x: FixedScalar(0),           // 0.0
+                y: FixedScalar(0x0001_0000), // 1.0
                 z: FixedScalar(0),
             },
             uv: [FixedScalar(0x0000_8000), FixedScalar(0)], // (0.5, 0.0)
             index: 0,
-            red: 255, green: 0, blue: 0,
+            red: 255,
+            green: 0,
+            blue: 0,
             normal: [0, 0, 0x7FFF], // (0, 0, ~1)
         };
         let v1 = BrVertex {
             position: Vec3 {
-                x: FixedScalar(-0x0001_0000),  // -1.0
-                y: FixedScalar(-0x0001_0000),  // -1.0
+                x: FixedScalar(-0x0001_0000), // -1.0
+                y: FixedScalar(-0x0001_0000), // -1.0
                 z: FixedScalar(0),
             },
             uv: [FixedScalar(0), FixedScalar(0x0001_0000)], // (0, 1)
             index: 0,
-            red: 0, green: 255, blue: 0,
+            red: 0,
+            green: 255,
+            blue: 0,
             normal: [0, 0, 0x7FFF],
         };
         let v2 = BrVertex {
             position: Vec3 {
-                x: FixedScalar(0x0001_0000),   // 1.0
-                y: FixedScalar(-0x0001_0000),  // -1.0
+                x: FixedScalar(0x0001_0000),  // 1.0
+                y: FixedScalar(-0x0001_0000), // -1.0
                 z: FixedScalar(0),
             },
             uv: [FixedScalar(0x0001_0000), FixedScalar(0x0001_0000)], // (1, 1)
             index: 0,
-            red: 0, green: 0, blue: 255,
+            red: 0,
+            green: 0,
+            blue: 255,
             normal: [0, 0, 0x7FFF],
         };
 
@@ -547,25 +557,53 @@ mod tests {
     #[test]
     fn material_base_color_from_colour() {
         let mat = material_to_gpu(&sample_brmaterial());
-        assert!((mat.gpu.base_color[0] - 1.0).abs() < 0.005, "R={}", mat.gpu.base_color[0]);
-        assert!((mat.gpu.base_color[1] - 0.502).abs() < 0.005, "G={}", mat.gpu.base_color[1]);
-        assert!((mat.gpu.base_color[2] - 0.251).abs() < 0.005, "B={}", mat.gpu.base_color[2]);
+        assert!(
+            (mat.gpu.base_color[0] - 1.0).abs() < 0.005,
+            "R={}",
+            mat.gpu.base_color[0]
+        );
+        assert!(
+            (mat.gpu.base_color[1] - 0.502).abs() < 0.005,
+            "G={}",
+            mat.gpu.base_color[1]
+        );
+        assert!(
+            (mat.gpu.base_color[2] - 0.251).abs() < 0.005,
+            "B={}",
+            mat.gpu.base_color[2]
+        );
         assert_eq!(mat.gpu.base_color[3], 1.0);
     }
 
     #[test]
     fn material_coefficients_from_fractions() {
         let mat = material_to_gpu(&sample_brmaterial());
-        assert!((mat.gpu.ambient  - 0.10).abs() < 0.002, "ambient={}", mat.gpu.ambient);
-        assert!((mat.gpu.diffuse  - 0.60).abs() < 0.002, "diffuse={}", mat.gpu.diffuse);
-        assert!((mat.gpu.specular - 0.60).abs() < 0.002, "specular={}", mat.gpu.specular);
+        assert!(
+            (mat.gpu.ambient - 0.10).abs() < 0.002,
+            "ambient={}",
+            mat.gpu.ambient
+        );
+        assert!(
+            (mat.gpu.diffuse - 0.60).abs() < 0.002,
+            "diffuse={}",
+            mat.gpu.diffuse
+        );
+        assert!(
+            (mat.gpu.specular - 0.60).abs() < 0.002,
+            "specular={}",
+            mat.gpu.specular
+        );
     }
 
     #[test]
     fn material_specular_power_from_brs() {
         let mat = material_to_gpu(&sample_brmaterial());
         // 0x0032_0000 / 65536 = 50.0
-        assert!((mat.gpu.specular_power - 50.0).abs() < 0.01, "power={}", mat.gpu.specular_power);
+        assert!(
+            (mat.gpu.specular_power - 50.0).abs() < 0.01,
+            "power={}",
+            mat.gpu.specular_power
+        );
     }
 
     #[test]
@@ -585,8 +623,11 @@ mod tests {
     fn material_black_colour() {
         let black = BrMaterial {
             colour: 0x00_00_00_00,
-            ka: 0, kd: 0, ks: 0,
-            index_base: 0, index_range: 0,
+            ka: 0,
+            kd: 0,
+            ks: 0,
+            index_base: 0,
+            index_range: 0,
             power: FixedScalar(0),
         };
         let mat = material_to_gpu(&black);
@@ -695,9 +736,25 @@ mod tests {
 
     // ── tmap_to_rgba ─────────────────────────────────────────────────────────
 
-    fn make_tmap(pixel_type: u8, width: i16, height: i16, row_bytes: i16, pixels: Vec<u8>) -> BrTmap {
-        BrTmap { row_bytes, pixel_type, flags: 0, base_x: 0, base_y: 0,
-                 width, height, origin_x: 0, origin_y: 0, pixels }
+    fn make_tmap(
+        pixel_type: u8,
+        width: i16,
+        height: i16,
+        row_bytes: i16,
+        pixels: Vec<u8>,
+    ) -> BrTmap {
+        BrTmap {
+            row_bytes,
+            pixel_type,
+            flags: 0,
+            base_x: 0,
+            base_y: 0,
+            width,
+            height,
+            origin_x: 0,
+            origin_y: 0,
+            pixels,
+        }
     }
 
     #[test]
@@ -708,7 +765,7 @@ mod tests {
         assert_eq!(w, 2);
         assert_eq!(h, 1);
         assert_eq!(rgba.len(), 8); // 2×1×4
-        // First pixel: black (0,0,0,255)
+                                   // First pixel: black (0,0,0,255)
         assert_eq!(&rgba[0..4], &[0, 0, 0, 255]);
         // Second pixel: white (255,255,255,255)
         assert_eq!(&rgba[4..8], &[255, 255, 255, 255]);
@@ -743,8 +800,8 @@ mod tests {
         assert_eq!(rgba.len(), 4);
         // R=31 → (31<<3)|(31>>2) = 248|7 = 255; G=0; B=0; A=255
         assert_eq!(rgba[0], 255, "R");
-        assert_eq!(rgba[1], 0,   "G");
-        assert_eq!(rgba[2], 0,   "B");
+        assert_eq!(rgba[1], 0, "G");
+        assert_eq!(rgba[2], 0, "B");
         assert_eq!(rgba[3], 255, "A");
     }
 

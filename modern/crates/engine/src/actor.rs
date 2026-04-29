@@ -46,7 +46,7 @@ impl ActorOnFile {
 
     /// Parse from exactly 44 bytes (LE or BE auto-detected via `bo` field).
     pub fn from_bytes(b: &[u8; 44]) -> EngineResult<Self> {
-        let bo_raw  = i16::from_le_bytes(b[0..2].try_into().unwrap());
+        let bo_raw = i16::from_le_bytes(b[0..2].try_into().unwrap());
         let osk_raw = i16::from_le_bytes(b[2..4].try_into().unwrap());
 
         // Detect byte swap needed (BE file on LE host).
@@ -60,11 +60,19 @@ impl ActorOnFile {
 
         let read_i32 = |off: usize| -> i32 {
             let raw = i32::from_le_bytes(b[off..off + 4].try_into().unwrap());
-            if swap { raw.swap_bytes() } else { raw }
+            if swap {
+                raw.swap_bytes()
+            } else {
+                raw
+            }
         };
         let read_u32 = |off: usize| -> u32 {
             let raw = u32::from_le_bytes(b[off..off + 4].try_into().unwrap());
-            if swap { raw.swap_bytes() } else { raw }
+            if swap {
+                raw.swap_bytes()
+            } else {
+                raw
+            }
         };
 
         let dxyz_full_rte = Vec3 {
@@ -73,16 +81,20 @@ impl ActorOnFile {
             z: FixedScalar(read_i32(12)),
         };
 
-        let arid       = read_i32(16);
+        let arid = read_i32(16);
         let nfrm_first = read_i32(20);
-        let nfrm_last  = read_i32(24);
+        let nfrm_last = read_i32(24);
 
         // TagOnFile at offset 28 (16 bytes, up through byte 43).
-        let tag_sid  = read_i32(28);
+        let tag_sid = read_i32(28);
         // b[32..36] = _pcrf padding (ignored)
-        let tag_ctg  = read_u32(36);
-        let tag_cno  = read_u32(40);
-        let tag_tmpl = TagOnFile { sid: tag_sid, ctg: tag_ctg, cno: tag_cno };
+        let tag_ctg = read_u32(36);
+        let tag_cno = read_u32(40);
+        let tag_tmpl = TagOnFile {
+            sid: tag_sid,
+            ctg: tag_ctg,
+            cno: tag_cno,
+        };
 
         Ok(Self {
             bo: bo_raw,
@@ -138,11 +150,7 @@ pub struct Actor {
 
 impl Actor {
     /// Construct from parsed ACTF + decoded sub-chunks.
-    pub fn new(
-        header: ActorOnFile,
-        route: Vec<RoutePoint>,
-        events: Vec<ActorEvent>,
-    ) -> Self {
+    pub fn new(header: ActorOnFile, route: Vec<RoutePoint>, events: Vec<ActorEvent>) -> Self {
         Self {
             arid: header.arid,
             dxyz_full_rte: header.dxyz_full_rte,
@@ -228,13 +236,21 @@ mod tests {
 
     #[test]
     fn test_actor_events_at_frame() {
-        use crate::events::{ActorEvent, AevHeader, EventPayload, aet};
-        use crate::transform::RouteLocation;
+        use crate::events::{aet, ActorEvent, AevHeader, EventPayload};
         use crate::fixedpoint::FixedScalar;
+        use crate::transform::RouteLocation;
 
-        let rtel = RouteLocation { irpt: 0, dwr: FixedScalar::ZERO, dnwr: FixedScalar::ZERO };
+        let rtel = RouteLocation {
+            irpt: 0,
+            dwr: FixedScalar::ZERO,
+            dnwr: FixedScalar::ZERO,
+        };
         let evt = ActorEvent {
-            header: AevHeader { aet: aet::HIDE, nfrm: 5, rtel },
+            header: AevHeader {
+                aet: aet::HIDE,
+                nfrm: 5,
+                rtel,
+            },
             payload: EventPayload::Hide { visible: false },
         };
         let actf = ActorOnFile::from_bytes(&make_actf_bytes(1, 0, 10)).unwrap();

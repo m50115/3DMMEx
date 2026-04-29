@@ -8,7 +8,10 @@ use engine::model::Model;
 use engine::tag::CTG_BMDL;
 use renderer::convert::model_to_mesh;
 
-const TMPLS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/tmpls.3cn");
+const TMPLS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/tmpls.3cn"
+);
 
 /// Helper: find the first BMDL chunk with valid renderable geometry.
 fn find_renderable_model(cfl: &ChunkyFile) -> Option<Model> {
@@ -17,13 +20,17 @@ fn find_renderable_model(cfl: &ChunkyFile) -> Option<Model> {
             Ok(d) => d,
             Err(_) => continue,
         };
-        if data.len() < 80 { continue; }
+        if data.len() < 80 {
+            continue;
+        }
 
         let model = match Model::from_bytes(&data) {
             Ok(m) => m,
             Err(_) => continue,
         };
-        if model.header.vertex_count == 0 { continue; }
+        if model.header.vertex_count == 0 {
+            continue;
+        }
         if model.has_valid_faces() {
             return Some(model);
         }
@@ -33,8 +40,7 @@ fn find_renderable_model(cfl: &ChunkyFile) -> Option<Model> {
 
 #[test]
 fn full_pipeline_model_to_mesh() {
-    let file = File::open(TMPLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
+    let file = File::open(TMPLS_PATH).unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
     let cfl = ChunkyFile::read(&mut reader).unwrap();
 
@@ -71,7 +77,11 @@ fn full_pipeline_model_to_mesh() {
     // Colors in [0, 1]
     for v in &mesh.vertices {
         for &c in &v.color {
-            assert!((0.0..=1.0).contains(&c), "Color out of range: {:?}", v.color);
+            assert!(
+                (0.0..=1.0).contains(&c),
+                "Color out of range: {:?}",
+                v.color
+            );
         }
     }
 
@@ -85,8 +95,7 @@ fn full_pipeline_model_to_mesh() {
 
 #[test]
 fn convert_all_renderable_models() {
-    let file = File::open(TMPLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
+    let file = File::open(TMPLS_PATH).unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
     let cfl = ChunkyFile::read(&mut reader).unwrap();
 
@@ -102,8 +111,12 @@ fn convert_all_renderable_models() {
             Ok(m) => m,
             Err(_) => continue,
         };
-        if !model.has_valid_faces() { continue; }
-        if model.header.vertex_count == 0 { continue; }
+        if !model.has_valid_faces() {
+            continue;
+        }
+        if model.header.vertex_count == 0 {
+            continue;
+        }
 
         let mesh = model_to_mesh(&model);
 

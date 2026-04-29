@@ -128,9 +128,24 @@ impl Mat34 {
     /// Identity matrix (diagonal = 1.0, translation = 0).
     pub const IDENTITY: Self = Self {
         m: [
-            [FixedScalar::ONE, FixedScalar::ZERO, FixedScalar::ZERO, FixedScalar::ZERO],
-            [FixedScalar::ZERO, FixedScalar::ONE, FixedScalar::ZERO, FixedScalar::ZERO],
-            [FixedScalar::ZERO, FixedScalar::ZERO, FixedScalar::ONE, FixedScalar::ZERO],
+            [
+                FixedScalar::ONE,
+                FixedScalar::ZERO,
+                FixedScalar::ZERO,
+                FixedScalar::ZERO,
+            ],
+            [
+                FixedScalar::ZERO,
+                FixedScalar::ONE,
+                FixedScalar::ZERO,
+                FixedScalar::ZERO,
+            ],
+            [
+                FixedScalar::ZERO,
+                FixedScalar::ZERO,
+                FixedScalar::ONE,
+                FixedScalar::ZERO,
+            ],
         ],
     };
 

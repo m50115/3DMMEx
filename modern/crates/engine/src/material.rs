@@ -64,14 +64,22 @@ impl BrMaterial {
 
         // osk at [2..4] — not needed for rendering, skip
         let colour = u32::from_le_bytes(data[4..8].try_into().unwrap());
-        let ka     = u16::from_le_bytes(data[8..10].try_into().unwrap());
-        let kd     = u16::from_le_bytes(data[10..12].try_into().unwrap());
-        let ks     = u16::from_le_bytes(data[12..14].try_into().unwrap());
-        let index_base  = data[14];
+        let ka = u16::from_le_bytes(data[8..10].try_into().unwrap());
+        let kd = u16::from_le_bytes(data[10..12].try_into().unwrap());
+        let ks = u16::from_le_bytes(data[12..14].try_into().unwrap());
+        let index_base = data[14];
         let index_range = data[15];
-        let power  = FixedScalar(i32::from_le_bytes(data[16..20].try_into().unwrap()));
+        let power = FixedScalar(i32::from_le_bytes(data[16..20].try_into().unwrap()));
 
-        Ok(Self { colour, ka, kd, ks, index_base, index_range, power })
+        Ok(Self {
+            colour,
+            ka,
+            kd,
+            ks,
+            index_base,
+            index_range,
+            power,
+        })
     }
 
     /// Serialize to 20 bytes (for round-trip testing).

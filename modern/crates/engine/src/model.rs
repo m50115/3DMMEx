@@ -293,7 +293,11 @@ impl Model {
             faces.push(BrFaceFile::from_le_bytes(chunk));
         }
 
-        Ok(Self { header, vertices, faces })
+        Ok(Self {
+            header,
+            vertices,
+            faces,
+        })
     }
 
     /// Whether this model was pre-prepared by BRender (radius > 0).
@@ -308,7 +312,8 @@ impl Model {
     /// Check that every face vertex index is within the vertex array.
     pub fn has_valid_faces(&self) -> bool {
         let nv = self.header.vertex_count as u16;
-        self.faces.iter()
+        self.faces
+            .iter()
             .all(|f| f.vertices.iter().all(|&vi| vi < nv))
     }
 
@@ -316,7 +321,8 @@ impl Model {
     pub fn to_bytes(&self) -> Vec<u8> {
         let cver = self.vertices.len();
         let cfac = self.faces.len();
-        let mut buf = Vec::with_capacity(ModelHeader::SIZE + cver * BrVertex::SIZE + cfac * BrFaceFile::SIZE);
+        let mut buf =
+            Vec::with_capacity(ModelHeader::SIZE + cver * BrVertex::SIZE + cfac * BrFaceFile::SIZE);
 
         buf.extend_from_slice(&self.header.to_le_bytes());
         for v in &self.vertices {

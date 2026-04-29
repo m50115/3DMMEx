@@ -22,9 +22,16 @@ impl std::fmt::Display for ChunkId {
         // CTG is stored as LE u32 in the file (first char at highest byte).
         // Print bytes in BE order to get the natural 4-char ASCII tag.
         let bytes = self.ctg.to_be_bytes();
-        let tag_str: String = bytes.iter().map(|&b| {
-            if b.is_ascii_graphic() || b == b' ' { b as char } else { '?' }
-        }).collect();
+        let tag_str: String = bytes
+            .iter()
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    b as char
+                } else {
+                    '?'
+                }
+            })
+            .collect();
         write!(f, "'{}':{}", tag_str, self.cno)
     }
 }

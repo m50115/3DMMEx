@@ -61,9 +61,9 @@ impl Bmat34 {
 
     pub const IDENTITY: Self = Self {
         m: [
-            [FixedScalar::ONE,  FixedScalar::ZERO, FixedScalar::ZERO],
-            [FixedScalar::ZERO, FixedScalar::ONE,  FixedScalar::ZERO],
-            [FixedScalar::ZERO, FixedScalar::ZERO, FixedScalar::ONE ],
+            [FixedScalar::ONE, FixedScalar::ZERO, FixedScalar::ZERO],
+            [FixedScalar::ZERO, FixedScalar::ONE, FixedScalar::ZERO],
+            [FixedScalar::ZERO, FixedScalar::ZERO, FixedScalar::ONE],
             [FixedScalar::ZERO, FixedScalar::ZERO, FixedScalar::ZERO],
         ],
     };
@@ -73,8 +73,7 @@ impl Bmat34 {
         for row in 0..4 {
             for col in 0..3 {
                 let off = (row * 3 + col) * 4;
-                m[row][col] =
-                    FixedScalar(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()));
+                m[row][col] = FixedScalar(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()));
             }
         }
         Self { m }
@@ -163,7 +162,9 @@ impl BrBackground {
         if bo != BO_LITTLE_ENDIAN {
             return Err(EngineError::InvalidByteOrder(bo as u16));
         }
-        Ok(Self { b_index_base: data[4] })
+        Ok(Self {
+            b_index_base: data[4],
+        })
     }
 
     /// Serialize to 8 bytes (for round-trip testing).
@@ -213,11 +214,11 @@ impl BrCamera {
         }
         Ok(Self {
             hither_z: FixedScalar(i32::from_le_bytes(data[4..8].try_into().unwrap())),
-            yon_z:    FixedScalar(i32::from_le_bytes(data[8..12].try_into().unwrap())),
-            a_fov:    u16::from_le_bytes(data[12..14].try_into().unwrap()),
+            yon_z: FixedScalar(i32::from_le_bytes(data[8..12].try_into().unwrap())),
+            a_fov: u16::from_le_bytes(data[12..14].try_into().unwrap()),
             // swPad at [14..16] — skipped
-            apos:     Apos::from_le_bytes(data[16..28].try_into().unwrap()),
-            bmat34:   Bmat34::from_le_bytes(data[28..76].try_into().unwrap()),
+            apos: Apos::from_le_bytes(data[16..28].try_into().unwrap()),
+            bmat34: Bmat34::from_le_bytes(data[28..76].try_into().unwrap()),
         })
     }
 
@@ -284,9 +285,9 @@ impl BrLight {
             });
         }
         Ok(Self {
-            bmat34:      Bmat34::from_le_bytes(data[0..48].try_into().unwrap()),
+            bmat34: Bmat34::from_le_bytes(data[0..48].try_into().unwrap()),
             r_intensity: FixedScalar(i32::from_le_bytes(data[48..52].try_into().unwrap())),
-            lt:          i32::from_le_bytes(data[52..56].try_into().unwrap()),
+            lt: i32::from_le_bytes(data[52..56].try_into().unwrap()),
         })
     }
 
@@ -331,7 +332,7 @@ impl BrLightList {
             return Err(EngineError::InvalidByteOrder(bo as u16));
         }
         let cb_entry = i32::from_le_bytes(data[4..8].try_into().unwrap());
-        let iv_mac   = i32::from_le_bytes(data[8..12].try_into().unwrap());
+        let iv_mac = i32::from_le_bytes(data[8..12].try_into().unwrap());
 
         if cb_entry != LITE_SIZE as i32 {
             return Err(EngineError::OutOfRange {
@@ -465,14 +466,14 @@ mod tests {
     fn sample_camera() -> BrCamera {
         BrCamera {
             hither_z: FixedScalar(0x0000_1999), // ~0.1
-            yon_z:    FixedScalar(0x0064_0000), // 100.0
-            a_fov:    0x2000,                   // ~45° = π/4
-            apos:     Apos {
+            yon_z: FixedScalar(0x0064_0000),    // 100.0
+            a_fov: 0x2000,                      // ~45° = π/4
+            apos: Apos {
                 xr_place: FixedScalar::ZERO,
                 yr_place: FixedScalar::ZERO,
                 zr_place: FixedScalar::ZERO,
             },
-            bmat34:   Bmat34::IDENTITY,
+            bmat34: Bmat34::IDENTITY,
         }
     }
 
@@ -490,14 +491,25 @@ mod tests {
         // a_fov = 0x2000 = 8192, bra_to_radians(8192) = 8192/65536*TAU ≈ π/4
         let cam = sample_camera();
         let fov = cam.fov_radians();
-        assert!((fov - std::f32::consts::FRAC_PI_4).abs() < 1e-4, "fov={fov}");
+        assert!(
+            (fov - std::f32::consts::FRAC_PI_4).abs() < 1e-4,
+            "fov={fov}"
+        );
     }
 
     #[test]
     fn camera_hither_yon_conversion() {
         let cam = sample_camera();
-        assert!((cam.hither_f32() - 0.1).abs() < 0.002, "hither={}", cam.hither_f32());
-        assert!((cam.yon_f32()   - 100.0).abs() < 0.01, "yon={}",    cam.yon_f32());
+        assert!(
+            (cam.hither_f32() - 0.1).abs() < 0.002,
+            "hither={}",
+            cam.hither_f32()
+        );
+        assert!(
+            (cam.yon_f32() - 100.0).abs() < 0.01,
+            "yon={}",
+            cam.yon_f32()
+        );
     }
 
     #[test]
@@ -516,9 +528,9 @@ mod tests {
 
     fn sample_light() -> BrLight {
         BrLight {
-            bmat34:      Bmat34::IDENTITY,
+            bmat34: Bmat34::IDENTITY,
             r_intensity: FixedScalar(0x0001_0000), // 1.0
-            lt:          light_type::DIRECTIONAL,
+            lt: light_type::DIRECTIONAL,
         }
     }
 

@@ -16,8 +16,10 @@ use engine::tag::CTG_TMAP;
 use engine::tmap::BrTmap;
 use renderer::convert::tmap_to_texture;
 
-const TMPLS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/tmpls.3cn");
+const TMPLS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/tmpls.3cn"
+);
 
 /// Try to create a headless wgpu device.  Returns `None` if no adapter is
 /// available (no GPU on the machine or CI environment).
@@ -57,8 +59,7 @@ fn upload_first_tmap_to_gpu() {
         }
     };
 
-    let file = File::open(TMPLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
+    let file = File::open(TMPLS_PATH).unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
     let cfl = ChunkyFile::read(&mut BufReader::new(file)).unwrap();
 
     // Find the first TMAP chunk that parses successfully.
@@ -80,7 +81,7 @@ fn upload_first_tmap_to_gpu() {
 
     // Verify texture dimensions.
     let size = gpu_tex.texture.size();
-    assert_eq!(size.width,  expected_w, "texture width mismatch");
+    assert_eq!(size.width, expected_w, "texture width mismatch");
     assert_eq!(size.height, expected_h, "texture height mismatch");
     assert_eq!(size.depth_or_array_layers, 1, "expected a single layer");
 
@@ -93,7 +94,9 @@ fn upload_first_tmap_to_gpu() {
 
     println!(
         "real_tmap_upload: uploaded {}×{} TMAP to GPU ({})",
-        expected_w, expected_h, gpu_tex.texture.format().describe_in_test(),
+        expected_w,
+        expected_h,
+        gpu_tex.texture.format().describe_in_test(),
     );
 }
 
@@ -105,8 +108,8 @@ impl FormatName for wgpu::TextureFormat {
     fn describe_in_test(&self) -> &'static str {
         match self {
             wgpu::TextureFormat::Rgba8UnormSrgb => "Rgba8UnormSrgb",
-            wgpu::TextureFormat::Rgba8Unorm     => "Rgba8Unorm",
-            _                                   => "other",
+            wgpu::TextureFormat::Rgba8Unorm => "Rgba8Unorm",
+            _ => "other",
         }
     }
 }

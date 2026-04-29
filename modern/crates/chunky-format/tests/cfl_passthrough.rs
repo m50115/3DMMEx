@@ -10,15 +10,18 @@
 //!
 //! The test prints a per-file summary. Human validation (3DMM 1995) is a separate step.
 
-use std::path::{Path, PathBuf};
 use chunky_format::cfl::ChunkyFile;
+use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
     // tests run from workspace root (modern/)
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()  // crates/
-        .parent().unwrap()  // modern/
-        .parent().unwrap()  // 3DMMEx/
+        .parent()
+        .unwrap() // crates/
+        .parent()
+        .unwrap() // modern/
+        .parent()
+        .unwrap() // 3DMMEx/
         .to_path_buf()
 }
 
@@ -119,12 +122,19 @@ fn test_file(path: &Path) -> FileResult {
     if cfl2.chunks.len() != chunk_count {
         semantic_errors.push(format!(
             "chunk count mismatch: original={} output={}",
-            chunk_count, cfl2.chunks.len()
+            chunk_count,
+            cfl2.chunks.len()
         ));
     }
     for orig in &cfl.chunks {
-        match cfl2.chunks.iter().find(|c| c.id.ctg == orig.id.ctg && c.id.cno == orig.id.cno) {
-            None => semantic_errors.push(format!("missing chunk {:?}:{}", orig.id.ctg, orig.id.cno)),
+        match cfl2
+            .chunks
+            .iter()
+            .find(|c| c.id.ctg == orig.id.ctg && c.id.cno == orig.id.cno)
+        {
+            None => {
+                semantic_errors.push(format!("missing chunk {:?}:{}", orig.id.ctg, orig.id.cno))
+            }
             Some(out_chunk) => {
                 if out_chunk.cb != orig.cb {
                     semantic_errors.push(format!(
@@ -141,16 +151,26 @@ fn test_file(path: &Path) -> FileResult {
                 if out_chunk.children.len() != orig.children.len() {
                     semantic_errors.push(format!(
                         "chunk {:?}:{} child count: {} vs {}",
-                        orig.id.ctg, orig.id.cno, orig.children.len(), out_chunk.children.len()
+                        orig.id.ctg,
+                        orig.id.cno,
+                        orig.children.len(),
+                        out_chunk.children.len()
                     ));
                 }
                 // Verify chunk data round-trips
-                let orig_data = cfl.get_chunk_data(orig.id.ctg, orig.id.cno).unwrap_or_default();
-                let out_data = cfl2.get_chunk_data(out_chunk.id.ctg, out_chunk.id.cno).unwrap_or_default();
+                let orig_data = cfl
+                    .get_chunk_data(orig.id.ctg, orig.id.cno)
+                    .unwrap_or_default();
+                let out_data = cfl2
+                    .get_chunk_data(out_chunk.id.ctg, out_chunk.id.cno)
+                    .unwrap_or_default();
                 if orig_data != out_data {
                     semantic_errors.push(format!(
                         "chunk {:?}:{} data mismatch (orig={} out={})",
-                        orig.id.ctg, orig.id.cno, orig_data.len(), out_data.len()
+                        orig.id.ctg,
+                        orig.id.cno,
+                        orig_data.len(),
+                        out_data.len()
                     ));
                 }
             }
@@ -162,7 +182,10 @@ fn test_file(path: &Path) -> FileResult {
     let first_diff_offset = if byte_identical {
         None
     } else {
-        original_bytes.iter().zip(output.iter()).enumerate()
+        original_bytes
+            .iter()
+            .zip(output.iter())
+            .enumerate()
             .find(|(_, (a, b))| a != b)
             .map(|(i, _)| i)
     };
@@ -186,7 +209,10 @@ fn passthrough_all_3mm_files() {
     assert!(!files.is_empty(), "No .3mm files found — check repo layout");
 
     println!("\n{}", "=".repeat(72));
-    println!("Phase 7-spike: Passthrough round-trip — {} files", files.len());
+    println!(
+        "Phase 7-spike: Passthrough round-trip — {} files",
+        files.len()
+    );
     println!("{}", "=".repeat(72));
 
     let mut pass_semantic = 0usize;
@@ -235,7 +261,11 @@ fn passthrough_all_3mm_files() {
     println!("{}", "=".repeat(72));
     println!(
         "Semantic OK: {}/{}   Byte-identical: {}/{}   FAIL: {}",
-        pass_semantic, files.len(), byte_identical_count, files.len(), fail_semantic
+        pass_semantic,
+        files.len(),
+        byte_identical_count,
+        files.len(),
+        fail_semantic
     );
 
     // Hard assertion: all files must pass semantic check

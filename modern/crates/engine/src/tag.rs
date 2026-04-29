@@ -148,7 +148,13 @@ impl TagOnFile {
 
 impl fmt::Display for TagOnFile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TAG(sid={} {}/{:#010x})", self.sid, self.ctg_str(), self.cno)
+        write!(
+            f,
+            "TAG(sid={} {}/{:#010x})",
+            self.sid,
+            self.ctg_str(),
+            self.cno
+        )
     }
 }
 
@@ -179,7 +185,11 @@ pub struct Tag {
 
 impl From<TagOnFile> for Tag {
     fn from(t: TagOnFile) -> Self {
-        Self { sid: t.sid, ctg: t.ctg, cno: t.cno }
+        Self {
+            sid: t.sid,
+            ctg: t.ctg,
+            cno: t.cno,
+        }
     }
 }
 
@@ -214,7 +224,11 @@ mod tests {
 
     #[test]
     fn test_tag_on_file_roundtrip() {
-        let tag = TagOnFile { sid: 0, ctg: CTG_MVIE, cno: 0x1234 };
+        let tag = TagOnFile {
+            sid: 0,
+            ctg: CTG_MVIE,
+            cno: 0x1234,
+        };
         let bytes = tag.to_le_bytes();
         assert_eq!(bytes.len(), 16);
 
@@ -223,9 +237,15 @@ mod tests {
         // _pcrf at [4..8] must be zero
         assert_eq!(&bytes[4..8], &[0u8; 4]);
         // ctg at [8..12]
-        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), CTG_MVIE);
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            CTG_MVIE
+        );
         // cno at [12..16]
-        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 0x1234u32);
+        assert_eq!(
+            u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            0x1234u32
+        );
 
         let parsed = TagOnFile::from_le_bytes(&bytes);
         assert_eq!(parsed, tag);
@@ -233,16 +253,28 @@ mod tests {
 
     #[test]
     fn test_tag_on_file_null() {
-        let null = TagOnFile { sid: 0, ctg: 0, cno: 0 };
+        let null = TagOnFile {
+            sid: 0,
+            ctg: 0,
+            cno: 0,
+        };
         assert!(null.is_null());
 
-        let non_null = TagOnFile { sid: 0, ctg: CTG_ACTR, cno: 1 };
+        let non_null = TagOnFile {
+            sid: 0,
+            ctg: CTG_ACTR,
+            cno: 1,
+        };
         assert!(!non_null.is_null());
     }
 
     #[test]
     fn test_tag_from_tag_on_file() {
-        let tof = TagOnFile { sid: -1, ctg: CTG_SCEN, cno: 42 };
+        let tof = TagOnFile {
+            sid: -1,
+            ctg: CTG_SCEN,
+            cno: 42,
+        };
         let tag: Tag = tof.into();
         assert_eq!(tag.sid, -1);
         assert_eq!(tag.ctg, CTG_SCEN);

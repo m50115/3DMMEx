@@ -27,7 +27,10 @@ impl AudioPlayer {
     pub fn try_new() -> Option<Self> {
         let (stream, stream_handle) = rodio::OutputStream::try_default().ok()?;
         let sink = rodio::Sink::try_new(&stream_handle).ok()?;
-        Some(Self { _stream: stream, sink })
+        Some(Self {
+            _stream: stream,
+            sink,
+        })
     }
 
     /// Enqueue raw RIFF WAV bytes for playback.

@@ -16,21 +16,25 @@ use engine::model::Model;
 use engine::tag::CTG_BMDL;
 
 /// Path to the content file with template models.
-const TMPLS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../content-files/tmpls.3cn");
+const TMPLS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../content-files/tmpls.3cn"
+);
 
 fn open_tmpls() -> ChunkyFile {
-    let file = File::open(TMPLS_PATH)
-        .unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
+    let file = File::open(TMPLS_PATH).unwrap_or_else(|e| panic!("Cannot open {TMPLS_PATH}: {e}"));
     let mut reader = BufReader::new(file);
-    ChunkyFile::read(&mut reader)
-        .unwrap_or_else(|e| panic!("Cannot parse {TMPLS_PATH}: {e}"))
+    ChunkyFile::read(&mut reader).unwrap_or_else(|e| panic!("Cannot parse {TMPLS_PATH}: {e}"))
 }
 
 #[test]
 fn tmpls_contains_bmdl_chunks() {
     let cfl = open_tmpls();
     let bmdl_count = cfl.chunks.iter().filter(|c| c.id.ctg == CTG_BMDL).count();
-    assert!(bmdl_count > 100, "Expected >100 BMDL chunks, got {bmdl_count}");
+    assert!(
+        bmdl_count > 100,
+        "Expected >100 BMDL chunks, got {bmdl_count}"
+    );
 }
 
 #[test]
@@ -43,15 +47,21 @@ fn models_with_valid_faces_convert_cleanly() {
             Ok(d) => d,
             Err(_) => continue,
         };
-        if data.len() < 48 { continue; }
+        if data.len() < 48 {
+            continue;
+        }
 
         let model = match Model::from_bytes(&data) {
             Ok(m) => m,
             Err(_) => continue,
         };
 
-        if !model.has_valid_faces() { continue; }
-        if model.header.vertex_count == 0 { continue; }
+        if !model.has_valid_faces() {
+            continue;
+        }
+        if model.header.vertex_count == 0 {
+            continue;
+        }
 
         assert_eq!(model.vertices.len(), model.header.vertex_count as usize);
         assert_eq!(model.faces.len(), model.header.face_count as usize);
@@ -74,15 +84,21 @@ fn unprepared_models_parse_structurally() {
             Ok(d) => d,
             Err(_) => continue,
         };
-        if data.len() < 48 { continue; }
+        if data.len() < 48 {
+            continue;
+        }
 
         let model = match Model::from_bytes(&data) {
             Ok(m) => m,
             Err(_) => continue,
         };
 
-        if model.is_prepared() { continue; }
-        if model.header.vertex_count == 0 { continue; }
+        if model.is_prepared() {
+            continue;
+        }
+        if model.header.vertex_count == 0 {
+            continue;
+        }
 
         // Structural checks: arrays have correct length
         assert_eq!(model.vertices.len(), model.header.vertex_count as usize);
@@ -107,7 +123,9 @@ fn bmdl_radius_is_non_negative() {
             Ok(d) => d,
             Err(_) => continue,
         };
-        if data.len() < 48 { continue; }
+        if data.len() < 48 {
+            continue;
+        }
 
         if let Ok(model) = Model::from_bytes(&data) {
             assert!(
@@ -131,9 +149,15 @@ fn chunk_category_breakdown() {
     for entry in cfl.chunks.iter().filter(|c| c.id.ctg == CTG_BMDL) {
         let data = match cfl.get_chunk_data(entry.id.ctg, entry.id.cno) {
             Ok(d) => d,
-            Err(_) => { non_modlf += 1; continue; }
+            Err(_) => {
+                non_modlf += 1;
+                continue;
+            }
         };
-        if data.len() < 48 { non_modlf += 1; continue; }
+        if data.len() < 48 {
+            non_modlf += 1;
+            continue;
+        }
 
         match Model::from_bytes(&data) {
             Ok(model) => {

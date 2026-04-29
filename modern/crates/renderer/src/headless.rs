@@ -36,6 +36,8 @@ pub struct HeadlessRenderer {
     pipeline: RenderPipeline,
     /// 1×1 white fallback texture — created once, shared across draw calls.
     fallback_texture: GpuTexture,
+    /// Uploaded TMAP textures keyed by `(ctg, cno)` of the source TMAP chunk.
+    texture_cache: HashMap<(u32, u32), GpuTexture>,
     /// Vertex/index buffers keyed by `(ctg, cno)` of the source BMDL chunk.
     /// Populated lazily on first scene render; invalidated on file change.
     mesh_cache: HashMap<(u32, u32), CachedMesh>,
@@ -74,7 +76,14 @@ impl HeadlessRenderer {
             .ok()?;
         let pipeline = RenderPipeline::new(&device, Self::DEFAULT_FORMAT, 640, 480);
         let fallback_texture = Self::white_texture_1x1(&device, &queue);
-        Some(Self { device, queue, pipeline, fallback_texture, mesh_cache: HashMap::new() })
+        Some(Self {
+            device,
+            queue,
+            pipeline,
+            fallback_texture,
+            texture_cache: HashMap::new(),
+            mesh_cache: HashMap::new(),
+        })
     }
 
     /// Async render of one or more models to RGBA8 pixels.
@@ -104,8 +113,10 @@ impl HeadlessRenderer {
         let rp = &self.pipeline;
 
         // ── meshes + combined world-space bounding box ────────────────────────
-        let mesh_transforms: Vec<_> =
-            renderable.iter().map(|(m, t)| (model_to_mesh(m), *t)).collect();
+        let mesh_transforms: Vec<_> = renderable
+            .iter()
+            .map(|(m, t)| (model_to_mesh(m), *t))
+            .collect();
 
         let (mut min_x, mut min_y, mut min_z) = (f32::MAX, f32::MAX, f32::MAX);
         let (mut max_x, mut max_y, mut max_z) = (f32::MIN, f32::MIN, f32::MIN);
@@ -123,11 +134,9 @@ impl HeadlessRenderer {
         let cx = (min_x + max_x) * 0.5;
         let cy = (min_y + max_y) * 0.5;
         let cz = (min_z + max_z) * 0.5;
-        let half_diag = ((max_x - min_x).powi(2)
-            + (max_y - min_y).powi(2)
-            + (max_z - min_z).powi(2))
-        .sqrt()
-            * 0.5;
+        let half_diag =
+            ((max_x - min_x).powi(2) + (max_y - min_y).powi(2) + (max_z - min_z).powi(2)).sqrt()
+                * 0.5;
         let fit_radius = half_diag.max(0.001);
 
         let mut camera = Camera::new();
@@ -145,8 +154,10 @@ impl HeadlessRenderer {
         // ── per-model GPU buffers + bind groups ───────────────────────────────
         // Use tuples instead of a named struct to avoid lifetime-param issues in async fn.
         // (vertex_buf, index_buf, instance_bg, index_count)
-        let draw_calls: Vec<(wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup, u32)> =
-            mesh_transforms.iter().enumerate().map(|(i, (mesh, transform))| {
+        let draw_calls: Vec<(wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup, u32)> = mesh_transforms
+            .iter()
+            .enumerate()
+            .map(|(i, (mesh, transform))| {
                 let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(&format!("vbuf_{i}")),
                     contents: bytemuck::cast_slice(&mesh.vertices),
@@ -182,7 +193,11 @@ impl HeadlessRenderer {
         // ── offscreen targets ─────────────────────────────────────────────────
         let color_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("color_target"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -194,7 +209,11 @@ impl HeadlessRenderer {
 
         let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth_target"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -269,7 +288,11 @@ impl HeadlessRenderer {
                     rows_per_image: Some(height),
                 },
             },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit(std::iter::once(encoder.finish()));
 
@@ -303,21 +326,22 @@ impl HeadlessRenderer {
 
     /// Async render of a scene frame using cached GPU buffers.
     ///
-    /// Each entry is `((ctg, cno), world_transform)`. Entries whose key is not
-    /// in the cache are silently skipped — call [`ensure_mesh`] first.
+    /// Each entry is `((ctg, cno), world_transform, optional_texture_key)`.
+    /// Entries whose mesh key is not in the cache are silently skipped — call
+    /// [`ensure_mesh`] first.
     /// Returns raw RGBA8 pixels or an empty Vec if nothing is renderable.
     pub async fn render_scene_async(
         &self,
-        models: &[((u32, u32), Mat4)],
+        models: &[((u32, u32), Mat4, Option<(u32, u32)>)],
         width: u32,
         height: u32,
         camera_override: Option<Camera>,
     ) -> Vec<u8> {
         // Collect only cached entries.
-        let entries: Vec<((u32, u32), Mat4)> = models
+        let entries: Vec<((u32, u32), Mat4, Option<(u32, u32)>)> = models
             .iter()
-            .filter(|(key, _)| self.mesh_cache.contains_key(key))
-            .map(|(key, t)| (*key, *t))
+            .filter(|(key, _, _)| self.mesh_cache.contains_key(key))
+            .map(|(key, t, texture_key)| (*key, *t, *texture_key))
             .collect();
         if entries.is_empty() {
             return Vec::new();
@@ -332,7 +356,7 @@ impl HeadlessRenderer {
         // ── world-space bbox from local AABB × 8 corners ─────────────────────
         let (mut min_x, mut min_y, mut min_z) = (f32::MAX, f32::MAX, f32::MAX);
         let (mut max_x, mut max_y, mut max_z) = (f32::MIN, f32::MIN, f32::MIN);
-        for (key, transform) in &entries {
+        for (key, transform, _) in &entries {
             let mesh = &self.mesh_cache[key];
             let [lx0, ly0, lz0] = mesh.local_min;
             let [lx1, ly1, lz1] = mesh.local_max;
@@ -353,14 +377,12 @@ impl HeadlessRenderer {
         let cx = (min_x + max_x) * 0.5;
         let cy = (min_y + max_y) * 0.5;
         let cz = (min_z + max_z) * 0.5;
-        let half_diag = ((max_x - min_x).powi(2)
-            + (max_y - min_y).powi(2)
-            + (max_z - min_z).powi(2))
-        .sqrt()
-            * 0.5;
+        let half_diag =
+            ((max_x - min_x).powi(2) + (max_y - min_y).powi(2) + (max_z - min_z).powi(2)).sqrt()
+                * 0.5;
         let fit_radius = half_diag.max(0.001);
 
-        let mut camera = if let Some(mut cam) = camera_override {
+        let camera = if let Some(mut cam) = camera_override {
             cam.aspect = width as f32 / height as f32;
             cam
         } else {
@@ -382,7 +404,7 @@ impl HeadlessRenderer {
         let draw_calls: Vec<(wgpu::BindGroup, u32, (u32, u32))> = entries
             .iter()
             .enumerate()
-            .map(|(i, (key, transform))| {
+            .map(|(i, (key, transform, texture_key))| {
                 let mesh = &self.mesh_cache[key];
                 let model_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(&format!("model_uniform_{i}")),
@@ -394,12 +416,16 @@ impl HeadlessRenderer {
                     contents: bytemuck::bytes_of(&GpuMaterial::default()),
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
+                let (view, sampler) = match texture_key.and_then(|k| self.texture_cache.get(&k)) {
+                    Some(tex) => (&tex.view, &tex.sampler),
+                    None => (&fallback.view, &fallback.sampler),
+                };
                 let instance_bg = rp.create_instance_bind_group(
                     device,
                     &model_buf,
                     &material_buf,
-                    &fallback.view,
-                    &fallback.sampler,
+                    view,
+                    sampler,
                 );
                 (instance_bg, mesh.index_count, *key)
             })
@@ -408,7 +434,11 @@ impl HeadlessRenderer {
         // ── offscreen targets ─────────────────────────────────────────────────
         let color_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("color_target"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -420,7 +450,11 @@ impl HeadlessRenderer {
 
         let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth_target"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -495,7 +529,11 @@ impl HeadlessRenderer {
                     rows_per_image: Some(height),
                 },
             },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit(std::iter::once(encoder.finish()));
 
@@ -521,9 +559,7 @@ impl HeadlessRenderer {
         let mut rgba = Vec::with_capacity((width * height * 4) as usize);
         for row in 0..height {
             let row_start = (row * bytes_per_row) as usize;
-            rgba.extend_from_slice(
-                &mapped[row_start..row_start + (width * 4) as usize],
-            );
+            rgba.extend_from_slice(&mapped[row_start..row_start + (width * 4) as usize]);
         }
         rgba
     }
@@ -556,7 +592,7 @@ impl HeadlessRenderer {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn render_scene(
         &self,
-        models: &[((u32, u32), Mat4)],
+        models: &[((u32, u32), Mat4, Option<(u32, u32)>)],
         width: u32,
         height: u32,
         camera_override: Option<Camera>,
@@ -600,16 +636,20 @@ impl HeadlessRenderer {
             max_z = max_z.max(v.position[2]);
         }
 
-        let vertex_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vbuf_cached"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ibuf_cached"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let vertex_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vbuf_cached"),
+                contents: bytemuck::cast_slice(&mesh.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let index_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ibuf_cached"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
         self.mesh_cache.insert(
             key,
             CachedMesh {
@@ -627,8 +667,81 @@ impl HeadlessRenderer {
         self.mesh_cache.clear();
     }
 
+    /// Upload RGBA8 texture bytes under `key` if not already cached.
+    pub fn ensure_texture(
+        &mut self,
+        key: (u32, u32),
+        width: u32,
+        height: u32,
+        rgba_bytes: &[u8],
+    ) {
+        if self.texture_cache.contains_key(&key) || width == 0 || height == 0 {
+            return;
+        }
+        if rgba_bytes.len() < (width as usize) * (height as usize) * 4 {
+            return;
+        }
+
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tmap_cached"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba_bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            size,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        self.texture_cache.insert(
+            key,
+            GpuTexture {
+                texture,
+                view,
+                sampler,
+            },
+        );
+    }
+
+    pub fn has_texture(&self, key: (u32, u32)) -> bool {
+        self.texture_cache.contains_key(&key)
+    }
+
+    pub fn clear_texture_cache(&mut self) {
+        self.texture_cache.clear();
+    }
+
     fn white_texture_1x1(device: &wgpu::Device, queue: &wgpu::Queue) -> GpuTexture {
-        let size = wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 };
+        let size = wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("white_1x1"),
             size,
@@ -660,6 +773,10 @@ impl HeadlessRenderer {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-        GpuTexture { texture, view, sampler }
+        GpuTexture {
+            texture,
+            view,
+            sampler,
+        }
     }
 }
