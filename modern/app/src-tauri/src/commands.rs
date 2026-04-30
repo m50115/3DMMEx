@@ -75,6 +75,31 @@ fn select_bmdl_child_for_cel<'a>(
     (fallback, true)
 }
 
+/// Try to upload a BMDL chunk into the GPU mesh cache. Returns the cache key
+/// on success, `None` if the chunk is missing, malformed, or has no renderable
+/// geometry. Idempotent: returns the existing key if already cached.
+fn try_load_bmdl_into_gpu(
+    gpu: &mut HeadlessRenderer,
+    cfl: &ChunkyFile,
+    ch: &ChildRef,
+) -> Option<(u32, u32)> {
+    let bmdl_key = (ch.id.ctg, ch.id.cno);
+    if gpu.has_mesh(bmdl_key) {
+        return Some(bmdl_key);
+    }
+    let data = cfl.get_chunk_data(bmdl_key.0, bmdl_key.1).ok()?;
+    if data.len() < 80 {
+        return None;
+    }
+    let m = Model::from_bytes(&data).ok()?;
+    gpu.ensure_mesh(bmdl_key, &m);
+    if gpu.has_mesh(bmdl_key) {
+        Some(bmdl_key)
+    } else {
+        None
+    }
+}
+
 fn resolve_texture_key_for_bmdl(cfl: &ChunkyFile, parent_ctg: u32, parent_cno: u32) -> Option<u32> {
     let mtrl_cno = cfl
         .get_children(parent_ctg, parent_cno)
@@ -857,16 +882,18 @@ pub(crate) fn render_to_rgba(
             }
             let mut found_key: Option<(u32, u32)> = None;
             if let Some(child) = selected_child {
-                let bmdl_key = (child.id.ctg, child.id.cno);
-                if gpu.has_mesh(bmdl_key) {
-                    found_key = Some(bmdl_key);
-                } else if let Ok(data) = lf.cfl.get_chunk_data(bmdl_key.0, bmdl_key.1) {
-                    if data.len() >= 80 {
-                        if let Ok(m) = Model::from_bytes(&data) {
-                            gpu.ensure_mesh(bmdl_key, &m);
-                            if gpu.has_mesh(bmdl_key) {
-                                found_key = Some(bmdl_key);
-                            }
+                found_key = try_load_bmdl_into_gpu(gpu, &lf.cfl, child);
+            }
+            if found_key.is_none() {
+                let already_tried_cel0 =
+                    selected_child.map(|c| c.chid == 0).unwrap_or(false);
+                if !already_tried_cel0 {
+                    if let Some(ch) = entry.local_bmdls.iter().find(|ch| ch.chid == 0) {
+                        found_key = try_load_bmdl_into_gpu(gpu, &lf.cfl, ch);
+                        if found_key.is_some() {
+                            diag.push(format!(
+                                "TMPL:{cno} cel {cel_index} BMDL invalid; using cel 0"
+                            ));
                         }
                     }
                 }
@@ -905,16 +932,18 @@ pub(crate) fn render_to_rgba(
                 }
                 let mut found_key: Option<(u32, u32)> = None;
                 if let Some(ch) = selected_child {
-                    let bmdl_key = (ch.id.ctg, ch.id.cno);
-                    if gpu.has_mesh(bmdl_key) {
-                        found_key = Some(bmdl_key);
-                    } else if let Ok(data) = tmpls.get_chunk_data(ch.id.ctg, ch.id.cno) {
-                        if data.len() >= 80 {
-                            if let Ok(m) = Model::from_bytes(&data) {
-                                gpu.ensure_mesh(bmdl_key, &m);
-                                if gpu.has_mesh(bmdl_key) {
-                                    found_key = Some(bmdl_key);
-                                }
+                    found_key = try_load_bmdl_into_gpu(gpu, &tmpls, ch);
+                }
+                if found_key.is_none() {
+                    let already_tried_cel0 =
+                        selected_child.map(|c| c.chid == 0).unwrap_or(false);
+                    if !already_tried_cel0 {
+                        if let Some(ch) = bmdl_children.iter().find(|ch| ch.chid == 0) {
+                            found_key = try_load_bmdl_into_gpu(gpu, &tmpls, ch);
+                            if found_key.is_some() {
+                                diag.push(format!(
+                                    "TMPL:{cno} cel {cel_index} BMDL invalid; using cel 0"
+                                ));
                             }
                         }
                     }
