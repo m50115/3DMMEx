@@ -75,6 +75,12 @@
       padding: 3px 6px; border-radius: 3px; font-size: 0.82rem; cursor: pointer;
     }
     #res:focus { outline: 1px solid var(--accent); }
+    #sample-picker {
+      background: var(--bg-elev); border: 1px solid var(--border-ctrl); color: var(--fg);
+      padding: 3px 6px; border-radius: 3px; font-size: 0.82rem; cursor: pointer;
+      max-width: 160px;
+    }
+    #sample-picker:focus { outline: 1px solid var(--accent); }
     #theme-toggle {
       background: var(--btn-bg); border: 1px solid var(--border-ctrl); color: var(--fg);
       padding: 3px 8px; border-radius: 3px; font-size: 0.82rem; cursor: pointer;
@@ -222,6 +228,35 @@
     button:hover { background: var(--btn-bg-hover); }
     #status { font-size: 0.8rem; color: var(--fg-muted); }
     #error { color: var(--error-fg); font-size: 0.85rem; padding: 0.5rem; background: var(--error-bg); border-radius: 4px; }
+
+    /* Debug panel — only visible when [data-debug="1"] on <html>. */
+    #debug-panel {
+      position: fixed;
+      bottom: 8px;
+      right: 8px;
+      max-width: 460px;
+      max-height: 60vh;
+      overflow: auto;
+      margin: 0;
+      padding: 8px 10px;
+      background: rgba(0,0,0,0.78);
+      color: #9f9;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.35;
+      border: 1px solid #2f2;
+      border-radius: 4px;
+      z-index: 9999;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    html[data-debug="1"] #debug-toggle::after { content: " ON"; color: #6f6; }
+    #debug-toggle {
+      background: var(--btn-bg); border: 1px solid var(--border-ctrl); color: var(--fg);
+      padding: 3px 8px; border-radius: 3px; font-size: 0.82rem; cursor: pointer;
+      line-height: 1.4;
+    }
+    #debug-toggle:hover { background: var(--btn-bg-hover); }
   </style>
 </head>
 <body>
@@ -233,7 +268,11 @@
       <option value="720p">720p (1280×720)</option>
       <option value="1080p">1080p (1920×1080)</option>
     </select>
+    <select id="sample-picker" title="Cargar movie de ejemplo">
+      <option value="">— sample movie —</option>
+    </select>
     <button id="theme-toggle" title="Toggle light/dark theme">🌙</button>
+    <button id="debug-toggle" title="Toggle debug overlay + auto-dump">🐞 debug</button>
   </div>
   <div id="drop">
     <strong>Arrastra un archivo .3mm aquí</strong>
