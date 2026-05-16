@@ -11,7 +11,9 @@ use chunky_format::ChildRef;
 use engine::actor::ActorOnFile;
 use engine::events::{ActorEvent, EventPayload};
 use engine::model::Model;
-use engine::tag::{CTG_ACTR, CTG_BMDL, CTG_GGAE, CTG_MTRL, CTG_PATH, CTG_SCEN, CTG_TMAP, CTG_TMPL};
+use engine::tag::{
+    CTG_ACTR, CTG_BMDL, CTG_CMTL, CTG_GGAE, CTG_MTRL, CTG_PATH, CTG_SCEN, CTG_TMAP, CTG_TMPL,
+};
 use engine::tmap::BrTmap;
 use engine::transform::RoutePoint;
 use glam::Mat4;
@@ -497,9 +499,31 @@ fn resolve_texture_key_for_bmdl(
     parent_ctg: u32,
     parent_cno: u32,
 ) -> Option<(u32, u32)> {
-    let mtrl_cno = cfl
-        .get_children(parent_ctg, parent_cno)
-        .into_iter()
+    // Canonical 3DMM hierarchy (verified against tmpls.3cn via probe_tree):
+    // TMPL → CMTL[chid=0] (default costume) → MTRL[chid=0..N] → TMAP
+    // CMTL is the costume-variant indirection; for now we use the first one
+    // (real costume selection lands with AEV_COST in Ph10.8).
+    let parent_children = cfl.get_children(parent_ctg, parent_cno);
+
+    if let Some(cmtl) = parent_children.iter().find(|ch| ch.id.ctg == CTG_CMTL) {
+        if let Some(mtrl) = cfl
+            .get_children(CTG_CMTL, cmtl.id.cno)
+            .into_iter()
+            .find(|ch| ch.id.ctg == CTG_MTRL)
+        {
+            if let Some(tmap) = cfl
+                .get_children(CTG_MTRL, mtrl.id.cno)
+                .into_iter()
+                .find(|ch| ch.id.ctg == CTG_TMAP)
+            {
+                return Some((CTG_TMAP, tmap.id.cno));
+            }
+        }
+    }
+
+    // Fallback: legacy TMPL → MTRL → TMAP (for content that bypasses CMTL).
+    let mtrl_cno = parent_children
+        .iter()
         .find(|ch| ch.id.ctg == CTG_MTRL)?
         .id
         .cno;
